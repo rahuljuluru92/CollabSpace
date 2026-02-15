@@ -11,8 +11,8 @@ const app = express();
 app.use(cors({ origin: process.env.CLIENT_ORIGIN ?? "*" }));
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/", (_req, res) => res.send("Server is running!"));
-app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/", (_req: express.Request, res: express.Response) => { res.send("Server is running!"); });
+app.get("/health", (_req: express.Request, res: express.Response) => { res.json({ ok: true }); });
 app.use("/api/auth", authRoutes);
 app.use("/api/workspaces", workspaceRoutes);
 
