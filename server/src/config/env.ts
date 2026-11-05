@@ -8,6 +8,8 @@ export type AppConfig = {
   jwtSecret: string;
   corsOrigins: string[];
   isProduction: boolean;
+  /** Per-IP limit for the login/register endpoints. */
+  authRateLimit: { windowMs: number; max: number };
 };
 
 const DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"];
@@ -39,5 +41,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const port = Number(env.PORT ?? 3001);
   if (!Number.isInteger(port) || port <= 0) throw new Error("PORT must be a positive integer");
 
-  return { port, mongoUri, jwtSecret, corsOrigins, isProduction };
+  const authRateLimit = {
+    windowMs: Number(env.AUTH_RATE_LIMIT_WINDOW_MS ?? 15 * 60 * 1000),
+    max: Number(env.AUTH_RATE_LIMIT_MAX ?? 20)
+  };
+  if (!Number.isInteger(authRateLimit.max) || authRateLimit.max <= 0) {
+    throw new Error("AUTH_RATE_LIMIT_MAX must be a positive integer");
+  }
+  if (!Number.isInteger(authRateLimit.windowMs) || authRateLimit.windowMs <= 0) {
+    throw new Error("AUTH_RATE_LIMIT_WINDOW_MS must be a positive integer");
+  }
+
+  return { port, mongoUri, jwtSecret, corsOrigins, isProduction, authRateLimit };
 }

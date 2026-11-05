@@ -16,6 +16,7 @@ export async function listWorkspaces(req: Request, res: Response) {
   const workspaces = await Workspace.find({
     $or: [{ ownerId: userId }, { members: userId }]
   })
+    .select("-recentEdits")
     .sort({ updatedAt: -1 })
     .lean<WorkspaceDocument[]>();
 

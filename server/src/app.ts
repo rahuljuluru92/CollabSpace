@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import setupSockets from "./sockets";
 import type { AppConfig } from "./config/env";
-import authRoutes from "./routes/auth";
+import { createAuthRouter } from "./routes/auth";
 import workspaceRoutes from "./routes/workspaces";
 import { errorHandler, notFound } from "./middleware/errors";
 
@@ -21,7 +21,7 @@ export function createServer(config: AppConfig) {
   app.get("/health", (_req, res) => {
     res.json({ ok: true });
   });
-  app.use("/api/auth", authRoutes);
+  app.use("/api/auth", createAuthRouter(config.authRateLimit));
   app.use("/api/workspaces", workspaceRoutes);
   app.use(notFound);
   app.use(errorHandler);

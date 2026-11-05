@@ -1,17 +1,17 @@
 import { Server, Socket } from "socket.io";
-import { Workspace } from "../models/Workspace";
+import { Workspace, WorkspaceDocument } from "../models/Workspace";
 import { ActivityLog, ActivityLogDocument } from "../models/ActivityLog";
 import { logActivity, shouldLogEdit } from "../services/activity";
 import { isWorkspaceMember, serializeActivity } from "../services/workspaceSerializer";
-import {
-  PresenceUpdatePayload,
-  UpdateAck,
-  WorkspaceSyncPayload
-} from "../types/events";
+import { PresenceUpdatePayload, UpdateAck, WorkspaceSyncPayload } from "../types/events";
 import { presenceJoin, presenceLeave, presenceUpdateCursor } from "./presence";
-import { isObjectId, isValidContent, isValidCursor } from "../utils/validation";
+import { runExclusive } from "./lock";
+import { isEditId, isObjectId, isValidContent, isValidCursor } from "../utils/validation";
 
 type Ack = (response: unknown) => void;
+
+/** How many applied edit ids each workspace remembers for resolving lost acks. */
+const RECENT_EDITS_KEPT = 20;
 
 /**
  * Wraps an async socket handler so a thrown error (bad input, DB hiccup) is
@@ -41,11 +41,11 @@ function readWorkspaceId(payload: unknown): string | null {
   return isObjectId(workspaceId) ? workspaceId : null;
 }
 
-async function buildSync(workspaceId: string): Promise<WorkspaceSyncPayload | null> {
-  const workspace = await Workspace.findById(workspaceId);
-  if (!workspace) return null;
-
-  const activity = await ActivityLog.find({ workspaceId })
+async function buildSync(
+  workspace: WorkspaceDocument,
+  pendingEditId: string | null = null
+): Promise<WorkspaceSyncPayload> {
+  const activity = await ActivityLog.find({ workspaceId: workspace._id })
     .sort({ createdAt: -1 })
     .limit(25)
     .lean<ActivityLogDocument[]>();
@@ -55,6 +55,12 @@ async function buildSync(workspaceId: string): Promise<WorkspaceSyncPayload | nu
     content: workspace.content,
     version: workspace.version,
     updatedAt: workspace.updatedAt.toISOString(),
+    ...(pendingEditId
+      ? {
+          pendingEditId,
+          pendingEditApplied: (workspace.recentEdits ?? []).some((e) => e.editId === pendingEditId)
+        }
+      : {}),
     activity: activity.map(serializeActivity)
   };
 }
@@ -65,91 +71,129 @@ export default function workspaceSocket(io: Server, socket: Socket) {
   safeHandler(socket, "workspace:join", async (payload) => {
     const workspaceId = readWorkspaceId(payload);
     if (!workspaceId) return;
+    const rawPending = (payload as { pendingEditId?: unknown }).pendingEditId;
+    const pendingEditId = isEditId(rawPending) ? rawPending : null;
 
-    const workspace = await Workspace.findById(workspaceId);
-    if (!workspace || !isWorkspaceMember(socket.user.id, workspace)) return;
+    // Queued behind any edit already received for this workspace, so the sync
+    // below reflects it (and pendingEditApplied is accurate).
+    await runExclusive(workspaceId, async () => {
+      if (!socket.connected) return;
 
-    const firstJoin = !socket.rooms.has(workspaceId);
-    socket.join(workspaceId);
+      const workspace = await Workspace.findById(workspaceId);
+      if (!workspace || !isWorkspaceMember(socket.user.id, workspace)) {
+        socket.emit("workspace:removed", { workspaceId });
+        return;
+      }
+      // The socket may have gone away while we were querying.
+      if (!socket.connected) return;
 
-    const users = presenceJoin(workspaceId, socket.id, {
-      id: socket.user.id,
-      name: socket.user.name
-    });
-    const presencePayload: PresenceUpdatePayload = { workspaceId, users };
-    io.to(workspaceId).emit("presence:update", presencePayload);
+      const firstJoin = !socket.rooms.has(workspaceId);
+      socket.join(workspaceId);
 
-    if (firstJoin) {
-      await logActivity({
-        workspaceId: workspace._id,
-        userId: socket.user.id,
-        action: "presence:joined"
+      const users = presenceJoin(workspaceId, socket.id, {
+        id: socket.user.id,
+        name: socket.user.name
       });
-    }
+      const presencePayload: PresenceUpdatePayload = { workspaceId, users };
+      io.to(workspaceId).emit("presence:update", presencePayload);
 
-    const sync = await buildSync(workspaceId);
-    if (sync) socket.emit("workspace:sync", sync);
+      if (firstJoin) {
+        await logActivity({
+          workspaceId: workspace._id,
+          userId: socket.user.id,
+          action: "presence:joined"
+        });
+      }
+
+      socket.emit("workspace:sync", await buildSync(workspace, pendingEditId));
+    });
   });
 
   safeHandler(socket, "workspace:update", async (payload, ack) => {
     const workspaceId = readWorkspaceId(payload);
-    const { content, version } = (payload ?? {}) as { content?: unknown; version?: unknown };
-    if (!workspaceId || !isValidContent(content) || !Number.isInteger(version)) {
+    const { content, version, editId } = (payload ?? {}) as {
+      content?: unknown;
+      version?: unknown;
+      editId?: unknown;
+    };
+    if (
+      !workspaceId ||
+      !isValidContent(content) ||
+      !Number.isInteger(version) ||
+      (editId !== undefined && !isEditId(editId))
+    ) {
       ack?.({ ok: false, reason: "invalid" } satisfies UpdateAck);
       return;
     }
 
     const userId = socket.user.id;
+    const baseVersion = version as number;
 
-    // Atomic compare-and-set: only applies if the client edited the latest
-    // version AND is still a member. Two concurrent writers cannot both win.
-    const updated = await Workspace.findOneAndUpdate(
-      {
-        _id: workspaceId,
-        version,
-        $or: [{ ownerId: userId }, { members: userId }]
-      },
-      { $set: { content }, $inc: { version: 1 } },
-      { new: true }
-    );
+    const applied = await runExclusive(workspaceId, async () => {
+      // Atomic compare-and-set: only applies if the client edited the latest
+      // version AND is still a member. Two concurrent writers cannot both win,
+      // even across several server instances.
+      const updated = await Workspace.findOneAndUpdate(
+        {
+          _id: workspaceId,
+          version: baseVersion,
+          $or: [{ ownerId: userId }, { members: userId }]
+        },
+        {
+          $set: { content },
+          $inc: { version: 1 },
+          ...(editId
+            ? {
+                $push: {
+                  recentEdits: {
+                    $each: [{ editId, version: baseVersion + 1 }],
+                    $slice: -RECENT_EDITS_KEPT
+                  }
+                }
+              }
+            : {})
+        },
+        { new: true }
+      );
 
-    if (!updated) {
-      const current = await Workspace.findById(workspaceId);
-      if (!current || !isWorkspaceMember(userId, current)) {
-        ack?.({ ok: false, reason: "forbidden" } satisfies UpdateAck);
-        return;
+      if (!updated) {
+        const current = await Workspace.findById(workspaceId);
+        if (!current || !isWorkspaceMember(userId, current)) {
+          ack?.({ ok: false, reason: "forbidden" } satisfies UpdateAck);
+          return null;
+        }
+        // Stale version: hand back the latest state so the client can rebase.
+        if (ack) {
+          ack({
+            ok: false,
+            reason: "conflict",
+            content: current.content,
+            version: current.version
+          } satisfies UpdateAck);
+        } else {
+          socket.emit("workspace:sync", await buildSync(current));
+        }
+        return null;
       }
-      // Stale version: hand back the latest state so the client can rebase.
-      const conflict: UpdateAck = {
-        ok: false,
-        reason: "conflict",
-        content: current.content,
-        version: current.version
-      };
-      if (ack) ack(conflict);
-      else {
-        const sync = await buildSync(workspaceId);
-        if (sync) socket.emit("workspace:sync", sync);
-      }
-      return;
-    }
 
-    ack?.({ ok: true, version: updated.version } satisfies UpdateAck);
+      ack?.({ ok: true, version: updated.version } satisfies UpdateAck);
 
-    // The sender already has this content; only others need it.
-    socket.to(workspaceId).emit("workspace:update", {
-      workspaceId,
-      content: updated.content,
-      version: updated.version,
-      userId
+      // The sender already has this content; only others need it.
+      socket.to(workspaceId).emit("workspace:update", {
+        workspaceId,
+        content: updated.content,
+        version: updated.version,
+        userId
+      });
+      return updated;
     });
 
-    if (shouldLogEdit(workspaceId, userId)) {
+    if (applied && shouldLogEdit(workspaceId, userId)) {
       await logActivity({
-        workspaceId: updated._id,
+        workspaceId: applied._id,
         userId,
         action: "workspace:updated",
-        metadata: { version: updated.version }
+        metadata: { version: applied.version }
       });
     }
   });

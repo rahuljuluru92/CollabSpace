@@ -139,9 +139,12 @@ describe("socket handlers", () => {
     a.emit("workspace:join", { workspaceId });
     await once(a, "workspace:sync");
 
-    // Outsider tries to join: no sync comes back.
+    // Outsider tries to join: told it is not available, and no sync comes back.
+    const refused = once(x, "workspace:removed");
+    const noSync = notReceived(x, "workspace:sync");
     x.emit("workspace:join", { workspaceId });
-    assert.equal(await notReceived(x, "workspace:sync"), true);
+    await refused;
+    assert.equal(await noSync, true);
 
     const ack = await x
       .timeout(2000)
@@ -167,8 +170,9 @@ describe("socket handlers", () => {
     const b = await connectSocket(ctx, member.token);
     a.emit("workspace:join", { workspaceId });
     await once(a, "workspace:sync");
+    const aSeesB = once(a, "presence:update");
     b.emit("workspace:join", { workspaceId });
-    await once(b, "workspace:sync");
+    await Promise.all([once(b, "workspace:sync"), aSeesB]);
 
     const removed = once(b, "workspace:removed");
     const presence = once<{ users: { id: string }[] }>(a, "presence:update");
@@ -182,6 +186,72 @@ describe("socket handlers", () => {
     b.emit("cursor:update", { workspaceId, cursor: { x: 1, y: 1 } });
     assert.equal(await noCursor, true);
 
+    a.disconnect();
+    b.disconnect();
+  });
+
+  it("tells a rejoining client whether its unacknowledged edit was applied", async () => {
+    const { owner, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+    const ack = await a.timeout(2000).emitWithAck("workspace:update", {
+      workspaceId,
+      content: "landed",
+      version: 1,
+      editId: "edit-1"
+    });
+    assert.deepEqual(ack, { ok: true, version: 2 });
+    a.disconnect();
+
+    // Pretend the ack was lost: a new connection asks about the edit.
+    const b = await connectSocket(ctx, owner.token);
+    const first = once(b, "workspace:sync");
+    b.emit("workspace:join", { workspaceId, pendingEditId: "edit-1" });
+    const sync1 = await first;
+    assert.equal(sync1.pendingEditId, "edit-1");
+    assert.equal(sync1.pendingEditApplied, true);
+    assert.equal(sync1.content, "landed");
+
+    const second = once(b, "workspace:sync");
+    b.emit("workspace:join", { workspaceId, pendingEditId: "never-sent" });
+    const sync2 = await second;
+    assert.equal(sync2.pendingEditApplied, false);
+
+    // Invalid edit ids are rejected.
+    const bad = await b.timeout(2000).emitWithAck("workspace:update", {
+      workspaceId,
+      content: "x",
+      version: 2,
+      editId: "not valid!"
+    });
+    assert.deepEqual(bad, { ok: false, reason: "invalid" });
+    b.disconnect();
+  });
+
+  it("delivers edits to each client in version order", async () => {
+    const { owner, member, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    const b = await connectSocket(ctx, member.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+    b.emit("workspace:join", { workspaceId });
+    await once(b, "workspace:sync");
+
+    // A fires several edits back to back; B must see them in order with no gaps.
+    const seen: number[] = [];
+    b.on("workspace:update", (u: { version: number }) => seen.push(u.version));
+    const acks = await Promise.all(
+      [1, 2, 3, 4, 5].map((v) =>
+        a.timeout(2000).emitWithAck("workspace:update", { workspaceId, content: `v${v}`, version: v })
+      )
+    );
+    assert.deepEqual(
+      acks.map((x) => x.version),
+      [2, 3, 4, 5, 6]
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(seen, [2, 3, 4, 5, 6]);
     a.disconnect();
     b.disconnect();
   });

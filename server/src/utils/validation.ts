@@ -6,8 +6,9 @@ export const LIMITS = {
   emailMax: 254,
   passwordMin: 8,
   passwordMax: 128,
-  // Keep well under MongoDB's 16MB document limit and the 1MB request cap.
-  contentMax: 500_000
+  // Characters. Even fully JSON-escaped this stays under the 2MB socket message
+  // cap, and far below MongoDB's 16MB document limit. Mirrored in the client.
+  contentMax: 200_000
 } as const;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -34,6 +35,11 @@ export function isValidPassword(value: unknown): value is string {
     value.length >= LIMITS.passwordMin &&
     value.length <= LIMITS.passwordMax
   );
+}
+
+/** Client-generated id for one edit (UUID or similar). */
+export function isEditId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 }
 
 export function isValidContent(value: unknown): value is string {

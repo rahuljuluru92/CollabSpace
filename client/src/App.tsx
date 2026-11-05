@@ -89,6 +89,7 @@ export default function App() {
     }
     return (
       <WorkspacePage
+        key={workspace.id}
         token={token}
         workspace={workspace}
         onBack={() => {

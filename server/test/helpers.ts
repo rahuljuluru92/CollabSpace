@@ -1,6 +1,6 @@
 import { AddressInfo } from "net";
 import mongoose from "mongoose";
-import { MongoMemoryServer } from "mongodb-memory-server";
+import { MongoMemoryServer } from "mongodb-memory-server-core";
 import { io as ioClient, Socket as ClientSocket } from "socket.io-client";
 import { createServer } from "../src/app";
 import { loadConfig } from "../src/config/env";
@@ -23,11 +23,18 @@ async function startMongo(): Promise<{ uri: string; stop: () => Promise<void> }>
       uri: url.toString(),
       stop: async () => {
         await mongoose.connection.dropDatabase();
+        await mongoose.disconnect();
       }
     };
   }
   const mongo = await MongoMemoryServer.create();
-  return { uri: mongo.getUri(), stop: async () => void (await mongo.stop()) };
+  return {
+    uri: mongo.getUri(),
+    stop: async () => {
+      await mongoose.disconnect();
+      await mongo.stop();
+    }
+  };
 }
 
 export async function startTestServer(): Promise<TestContext> {
@@ -36,7 +43,9 @@ export async function startTestServer(): Promise<TestContext> {
   const config = loadConfig({
     MONGO_URI: mongo.uri,
     JWT_SECRET: "test-secret",
-    NODE_ENV: "test"
+    NODE_ENV: "test",
+    // Tests register many users from one IP.
+    AUTH_RATE_LIMIT_MAX: "10000"
   } as NodeJS.ProcessEnv);
   await mongoose.connect(config.mongoUri);
   await mongoose.connection.syncIndexes();
@@ -51,7 +60,6 @@ export async function startTestServer(): Promise<TestContext> {
       io.close();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await mongo.stop();
-      await mongoose.disconnect();
     }
   };
 }

@@ -7,8 +7,9 @@ import { setIo } from "./registry";
 export default function setupSockets(httpServer: HttpServer, corsOrigins: string[]) {
   const io = new Server(httpServer, {
     cors: { origin: corsOrigins },
-    // Matches the REST body limit; workspace content is capped well below it.
-    maxHttpBufferSize: 1e6
+    // Largest accepted message. Workspace content is capped (in characters) so
+    // that even fully escaped JSON fits; anything bigger is dropped by Socket.IO.
+    maxHttpBufferSize: 2e6
   });
 
   io.use(socketAuth);

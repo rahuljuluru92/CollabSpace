@@ -4,8 +4,19 @@ import { loadConfig } from "../src/config/env";
 import { isEmail, isObjectId, isValidCursor } from "../src/utils/validation";
 import { presenceJoin, presenceLeave, presenceReset } from "../src/sockets/presence";
 import { shouldLogEdit } from "../src/services/activity";
+import { runExclusive } from "../src/sockets/lock";
+import { rateLimit } from "../src/middleware/rateLimit";
+import type { Request, Response } from "express";
 
 describe("loadConfig", () => {
+  it("rejects a bad rate-limit setting", () => {
+    assert.throws(
+      () =>
+        loadConfig({ MONGO_URI: "m", JWT_SECRET: "x", AUTH_RATE_LIMIT_MAX: "0" } as NodeJS.ProcessEnv),
+      /AUTH_RATE_LIMIT_MAX/
+    );
+  });
+
   it("requires MONGO_URI and JWT_SECRET", () => {
     assert.throws(() => loadConfig({ JWT_SECRET: "x" } as NodeJS.ProcessEnv), /MONGO_URI/);
     assert.throws(() => loadConfig({ MONGO_URI: "m" } as NodeJS.ProcessEnv), /JWT_SECRET/);
@@ -80,5 +91,72 @@ describe("shouldLogEdit", () => {
     assert.equal(shouldLogEdit("w-unit", "u", t + 1000), false);
     assert.equal(shouldLogEdit("w-unit", "other", t + 1000), true);
     assert.equal(shouldLogEdit("w-unit", "u", t + 61_000), true);
+  });
+});
+
+describe("runExclusive", () => {
+  const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("runs tasks for the same key one at a time, in order, even after a failure", async () => {
+    const order: string[] = [];
+    const a = runExclusive("k", async () => {
+      await delay(30);
+      order.push("a");
+    });
+    const b = runExclusive("k", async () => {
+      order.push("b");
+    });
+    const c = runExclusive("k", async () => {
+      throw new Error("boom");
+    });
+    const d = runExclusive("k", async () => {
+      order.push("d");
+      return 42;
+    });
+    await a;
+    await b;
+    await assert.rejects(c, /boom/);
+    assert.equal(await d, 42);
+    assert.deepEqual(order, ["a", "b", "d"]);
+  });
+
+  it("does not block other keys", async () => {
+    const order: string[] = [];
+    const slow = runExclusive("slow", async () => {
+      await delay(30);
+      order.push("slow");
+    });
+    const fast = runExclusive("fast", async () => {
+      order.push("fast");
+    });
+    await Promise.all([slow, fast]);
+    assert.deepEqual(order, ["fast", "slow"]);
+  });
+});
+
+describe("rateLimit", () => {
+  function hit(limiter: ReturnType<typeof rateLimit>, ip: string) {
+    let status = 200;
+    let passed = false;
+    const res = {
+      setHeader() {},
+      status(code: number) {
+        status = code;
+        return { json() {} };
+      }
+    } as unknown as Response;
+    limiter({ ip } as Request, res, () => {
+      passed = true;
+    });
+    return passed ? 200 : status;
+  }
+
+  it("returns 429 after the limit, per IP", () => {
+    const limiter = rateLimit({ windowMs: 60_000, max: 2 });
+    assert.deepEqual(
+      [hit(limiter, "1.1.1.1"), hit(limiter, "1.1.1.1"), hit(limiter, "1.1.1.1")],
+      [200, 200, 429]
+    );
+    assert.equal(hit(limiter, "2.2.2.2"), 200);
   });
 });
