@@ -100,12 +100,14 @@ export async function inviteMember(req: Request, res: Response) {
     return res.status(404).json({ error: "User not found" });
   }
 
-  // $addToSet is atomic, so concurrent invites cannot add duplicates.
+  // Atomic: the filter only matches if the user is not a member yet, so
+  // concurrent invites cannot add duplicates. (modifiedCount can't be used:
+  // timestamps make every matched update bump updatedAt.)
   const result = await Workspace.updateOne(
-    { _id: workspace._id },
-    { $addToSet: { members: user._id } }
+    { _id: workspace._id, members: { $ne: user._id } },
+    { $push: { members: user._id } }
   );
-  const added = result.modifiedCount > 0;
+  const added = result.matchedCount > 0;
 
   if (added) {
     await logActivity({
@@ -139,13 +141,13 @@ export async function deleteWorkspace(req: Request, res: Response) {
     return res.json({ success: true, message: "Workspace deleted" });
   }
 
-  // A member leaves.
+  // A member leaves. The filter only matches while they are still a member.
   const result = await Workspace.updateOne(
     { _id: workspace._id, members: userId },
     { $pull: { members: userId } }
   );
 
-  if (result.modifiedCount > 0) {
+  if (result.matchedCount > 0) {
     await logActivity({
       workspaceId: workspace._id,
       userId,
