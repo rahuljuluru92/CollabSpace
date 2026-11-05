@@ -7,20 +7,39 @@ export type Session = {
   user: User;
 };
 
+// localStorage can be unavailable (privacy modes, blocked storage) or hold
+// stale/corrupt data, so every access is guarded and validated.
+
 export function saveSession(session: Session) {
-  localStorage.setItem(KEY, JSON.stringify(session));
+  try {
+    localStorage.setItem(KEY, JSON.stringify(session));
+  } catch {
+    // Not persisted; the user stays signed in for this tab only.
+  }
 }
 
 export function loadSession(): Session | null {
-  const raw = localStorage.getItem(KEY);
-  if (!raw) return null;
   try {
-    return JSON.parse(raw) as Session;
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<Session> | null;
+    if (
+      typeof parsed?.token !== "string" ||
+      typeof parsed.user?.id !== "string" ||
+      typeof parsed.user?.name !== "string"
+    ) {
+      return null;
+    }
+    return parsed as Session;
   } catch {
     return null;
   }
 }
 
 export function clearSession() {
-  localStorage.removeItem(KEY);
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // Nothing stored.
+  }
 }

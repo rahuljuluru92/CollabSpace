@@ -1,13 +1,31 @@
-import { Router } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { requireAuth } from "../middleware/auth";
-import { createWorkspace, deleteWorkspace, getWorkspace, inviteMember, listWorkspaces } from "../controllers/workspaceController";
+import {
+  createWorkspace,
+  deleteWorkspace,
+  getWorkspace,
+  inviteMember,
+  listActivity,
+  listWorkspaces
+} from "../controllers/workspaceController";
+import { isObjectId } from "../utils/validation";
 
 const router = Router();
 
-router.get("/", requireAuth, listWorkspaces);
-router.post("/", requireAuth, createWorkspace);
-router.get("/:id", requireAuth, getWorkspace);
-router.post("/:id/invite", requireAuth, inviteMember);
-router.delete("/:id", requireAuth, deleteWorkspace);
+function validateId(req: Request, res: Response, next: NextFunction) {
+  if (!isObjectId(req.params.id)) {
+    return res.status(404).json({ error: "Workspace not found" });
+  }
+  return next();
+}
+
+router.use(requireAuth);
+
+router.get("/", listWorkspaces);
+router.post("/", createWorkspace);
+router.get("/:id", validateId, getWorkspace);
+router.get("/:id/activity", validateId, listActivity);
+router.post("/:id/invite", validateId, inviteMember);
+router.delete("/:id", validateId, deleteWorkspace);
 
 export default router;

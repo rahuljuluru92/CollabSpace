@@ -4,24 +4,28 @@ export type User = {
   email: string;
 };
 
+/** Dashboard entry. */
 export type WorkspaceSummary = {
   id: string;
   name: string;
   ownerId: string;
   members: string[];
-  content: string;
+  /** First few hundred characters of the document. */
+  preview: string;
   version: number;
   updatedAt: string;
 };
 
-export type WorkspaceDetail = WorkspaceSummary & {
-  activity: ActivityLog[];
+/** Full workspace, as returned by GET /api/workspaces/:id. */
+export type Workspace = Omit<WorkspaceSummary, "preview"> & {
+  content: string;
 };
 
 export type ActivityLog = {
   id: string;
   action: string;
   userId: string;
+  userName: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
 };

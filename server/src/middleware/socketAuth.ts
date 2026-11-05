@@ -1,16 +1,14 @@
-import jwt from "jsonwebtoken";
-import { UserPayload } from "../types/UserPayload";
+import type { Socket } from "socket.io";
+import { verifyUserToken } from "../utils/jwt";
 
-export function socketAuth(socket: any, next: any) {
-  const token = socket.handshake.auth?.token;
+export function socketAuth(socket: Socket, next: (err?: Error) => void) {
+  const token: unknown = socket.handshake.auth?.token;
 
-  if (!token) return next(new Error("NO_TOKEN"));
+  if (typeof token !== "string" || !token) return next(new Error("NO_TOKEN"));
 
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as UserPayload;
-    socket.user = decoded;
-    next();
-  } catch (err) {
-    next(new Error("INVALID_TOKEN"));
-  }
+  const user = verifyUserToken(token);
+  if (!user) return next(new Error("INVALID_TOKEN"));
+
+  socket.user = user;
+  next();
 }

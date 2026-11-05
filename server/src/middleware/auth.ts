@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-import { UserPayload } from "../types/UserPayload";
+import { verifyUserToken } from "../utils/jwt";
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
@@ -10,11 +9,11 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: "Missing token" });
   }
 
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as UserPayload;
-    req.user = decoded;
-    return next();
-  } catch (err) {
+  const user = verifyUserToken(token);
+  if (!user) {
     return res.status(401).json({ error: "Invalid token" });
   }
+
+  req.user = user;
+  return next();
 }

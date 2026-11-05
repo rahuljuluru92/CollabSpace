@@ -1,31 +1,65 @@
 import "dotenv/config";
-import http from "http";
-import express from "express";
-import cors from "cors";
-import setupSockets from "./sockets";
+import mongoose from "mongoose";
 import { connectDb } from "./config/db";
-import authRoutes from "./routes/auth";
-import workspaceRoutes from "./routes/workspaces";
+import { loadConfig } from "./config/env";
+import { createServer } from "./app";
+import { drain } from "./sockets/lock";
+import { lifecycle } from "./lifecycle";
+import { logger } from "./logger";
 
-const app = express();
-app.use(cors({ origin: process.env.CLIENT_ORIGIN ?? "*" }));
-app.use(express.json({ limit: "1mb" }));
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
-app.get("/", (_req: express.Request, res: express.Response) => { res.send("Server is running!"); });
-app.get("/health", (_req: express.Request, res: express.Response) => { res.json({ ok: true }); });
-app.use("/api/auth", authRoutes);
-app.use("/api/workspaces", workspaceRoutes);
+const config = loadConfig();
+const { server, io } = createServer(config);
 
-const server = http.createServer(app);
-setupSockets(server);
+/**
+ * Graceful shutdown (Render and most hosts send SIGTERM on every deploy):
+ * 1. Mark the server as shutting down: readiness turns 503 and new edits are
+ *    refused with "unavailable", so clients know they were not applied.
+ * 2. Let edits that were already received finish and be acknowledged.
+ * 3. Close Socket.IO and the HTTP server (in-flight requests complete;
+ *    clients reconnect to the new instance), then the database connection.
+ */
+async function shutdown(signal: string) {
+  if (lifecycle.isShuttingDown()) return;
+  lifecycle.beginShutdown();
+  logger.info({ signal }, "Shutting down");
 
-const PORT = Number(process.env.PORT ?? 3001);
+  const forceExit = setTimeout(() => {
+    logger.error("Shutdown timed out, exiting");
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  forceExit.unref();
 
-connectDb()
+  try {
+    await drain();
+    await io.close();
+    await mongoose.disconnect();
+    logger.info("Shutdown complete");
+    process.exit(0);
+  } catch (err) {
+    logger.error({ err }, "Shutdown failed");
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+
+// Last line of defence: log instead of crashing on a stray rejected promise.
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: reason }, "Unhandled promise rejection");
+});
+process.on("uncaughtException", (err) => {
+  logger.fatal({ err }, "Uncaught exception");
+  process.exit(1);
+});
+
+connectDb(config.mongoUri)
   .then(() => {
-    server.listen(PORT, () => console.log("Server running on port", PORT));
+    server.listen(config.port, () => logger.info({ port: config.port }, "Server listening"));
   })
   .catch((err) => {
-    console.error("Failed to connect to MongoDB", err);
+    logger.fatal({ err }, "Failed to connect to MongoDB");
     process.exit(1);
   });

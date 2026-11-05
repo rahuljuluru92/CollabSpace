@@ -1,17 +1,33 @@
+export type Cursor = { x: number; y: number };
+
 export type PresenceUser = {
   id: string;
   name: string;
   color?: string;
-  cursor?: { x: number; y: number } | null;
+  cursor?: Cursor | null;
 };
 
+// workspaceId -> socketId -> user. One user may have several tabs (sockets).
 const presenceByWorkspace = new Map<string, Map<string, PresenceUser>>();
+
+/** One entry per user, even if they have several sockets in the room. */
+function uniqueUsers(room: Map<string, PresenceUser>): PresenceUser[] {
+  const byUser = new Map<string, PresenceUser>();
+  for (const user of room.values()) {
+    const existing = byUser.get(user.id);
+    // Prefer an entry that has a live cursor.
+    if (!existing || (!existing.cursor && user.cursor)) {
+      byUser.set(user.id, { ...user });
+    }
+  }
+  return Array.from(byUser.values());
+}
 
 export function presenceJoin(workspaceId: string, socketId: string, user: PresenceUser) {
   const room = presenceByWorkspace.get(workspaceId) ?? new Map<string, PresenceUser>();
-  room.set(socketId, user);
+  room.set(socketId, { ...user });
   presenceByWorkspace.set(workspaceId, room);
-  return Array.from(room.values());
+  return uniqueUsers(room);
 }
 
 export function presenceLeave(workspaceId: string, socketId: string) {
@@ -22,22 +38,20 @@ export function presenceLeave(workspaceId: string, socketId: string) {
     presenceByWorkspace.delete(workspaceId);
     return [];
   }
-  return Array.from(room.values());
+  return uniqueUsers(room);
 }
 
 export function presenceList(workspaceId: string) {
   const room = presenceByWorkspace.get(workspaceId);
-  if (!room) return [];
-  return Array.from(room.values());
+  return room ? uniqueUsers(room) : [];
 }
 
-export function presenceUpdateCursor(workspaceId: string, socketId: string, cursor: { x: number; y: number } | null) {
-  const room = presenceByWorkspace.get(workspaceId);
-  if (!room) return;
+export function presenceUpdateCursor(workspaceId: string, socketId: string, cursor: Cursor | null) {
+  const user = presenceByWorkspace.get(workspaceId)?.get(socketId);
+  if (user) user.cursor = cursor;
+}
 
-  const user = room.get(socketId);
-  if (!user) return;
-
-  user.cursor = cursor;
-  // We modify the object by reference, so it's updated in the map.
+/** Test helper. */
+export function presenceReset() {
+  presenceByWorkspace.clear();
 }
