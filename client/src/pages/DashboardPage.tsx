@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { deleteWorkspace } from "../lib/api";
 import type { WorkspaceSummary, User } from "../types";
 
 type Props = {
@@ -8,6 +7,7 @@ type Props = {
   onCreate: (name: string) => Promise<void>;
   onOpen: (workspaceId: string) => void;
   onRefresh: () => Promise<void>;
+  onDelete: (workspaceId: string) => Promise<void>;
   onLogout: () => void;
 };
 
@@ -17,19 +17,27 @@ export default function DashboardPage({
   onCreate,
   onOpen,
   onRefresh,
+  onDelete,
   onLogout
 }: Props) {
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   async function handleCreate(event: React.FormEvent) {
     event.preventDefault();
     if (!name.trim()) return;
     setLoading(true);
-    await onCreate(name.trim());
-    setName("");
-    setLoading(false);
+    setCreateError(null);
+    try {
+      await onCreate(name.trim());
+      setName("");
+    } catch (err) {
+      setCreateError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleDelete(workspace: WorkspaceSummary, event: React.MouseEvent) {
@@ -43,18 +51,7 @@ export default function DashboardPage({
 
     setDeletingId(workspace.id);
     try {
-      // Assuming token is stored in localStorage by lib/storage.ts or passed down.
-      // Since DashboardPage doesn't receive token directly in props but App.tsx has it, 
-      // we might need to modify App.tsx to pass a handleDelete prop OR use the token from storage.
-      // Analyzing App.tsx again... App.tsx has the token. It should pass a handleDelete callback.
-      // Wait, let's fix the props structure in the next step or assume we can get token from storage.
-      // Actually, looking at imports, `loadSession` from `../lib/storage` can retrieve the token.
-
-      const session = JSON.parse(localStorage.getItem("syncspace_session") || "{}");
-      if (session.token) {
-        await deleteWorkspace(session.token, workspace.id);
-        await onRefresh();
-      }
+      await onDelete(workspace.id);
     } catch (err) {
       alert("Failed to delete workspace: " + (err as Error).message);
     } finally {
@@ -100,10 +97,19 @@ export default function DashboardPage({
               </p>
             )}
             {workspaces.map((workspace) => (
-              <button
+              <div
                 key={workspace.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => onOpen(workspace.id)}
-                className="group w-full text-left p-4 rounded-xl border border-white/10 hover:border-neon/50 hover:bg-white/5 transition relative"
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onOpen(workspace.id);
+                  }
+                }}
+                className="cursor-pointer group w-full text-left p-4 rounded-xl border border-white/10 hover:border-neon/50 hover:bg-white/5 transition relative"
               >
                 <div className="flex items-center justify-between">
                   <h3 className="text-base font-semibold text-fog">
@@ -114,9 +120,10 @@ export default function DashboardPage({
                       v{workspace.version}
                     </span>
                     <button
+                      type="button"
                       onClick={(e) => handleDelete(workspace, e)}
                       disabled={deletingId === workspace.id}
-                      className="opacity-0 group-hover:opacity-100 p-1.5 rounded-md hover:bg-coral/20 text-coral/70 hover:text-coral transition-all"
+                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 rounded-md hover:bg-coral/20 text-coral/70 hover:text-coral transition-all"
                       title={workspace.ownerId === user.id ? "Delete Workspace" : "Leave Workspace"}
                     >
                       {deletingId === workspace.id ? (
@@ -135,7 +142,7 @@ export default function DashboardPage({
                 <p className="text-xs text-fog/40 mt-3">
                   Updated {new Date(workspace.updatedAt).toLocaleString()}
                 </p>
-              </button>
+              </div>
             ))}
           </div>
         </div>
@@ -159,6 +166,7 @@ export default function DashboardPage({
             >
               {loading ? "Creating..." : "Create"}
             </button>
+            {createError && <p className="text-sm text-coral">{createError}</p>}
           </form>
         </div>
       </section>

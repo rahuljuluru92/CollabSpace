@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { Socket } from "socket.io-client";
 import type { ActivityLog, PresenceUser, WorkspaceSummary } from "../types";
-import { createSocket } from "../lib/socket";
+import { createSocket, type UpdateAck } from "../lib/socket";
 import { inviteMember } from "../lib/api";
+import { merge, transformIndex } from "../lib/textMerge";
 import { usePresence } from "../hooks/usePresence";
 
 type Props = {
@@ -9,6 +11,10 @@ type Props = {
   workspace: WorkspaceSummary;
   onBack: () => void;
 };
+
+// Wait for a short pause in typing before sending, instead of one write per keystroke.
+const SEND_DEBOUNCE_MS = 150;
+const ACK_TIMEOUT_MS = 10_000;
 
 export default function WorkspacePage({ token, workspace, onBack }: Props) {
   const [content, setContent] = useState(workspace.content ?? "");
@@ -21,10 +27,23 @@ export default function WorkspacePage({ token, workspace, onBack }: Props) {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteStatus, setInviteStatus] = useState<string | null>(null);
   const [inviteLoading, setInviteLoading] = useState(false);
-  const socketRef = useRef<ReturnType<typeof createSocket> | null>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  usePresence(socketRef.current, workspace.id, containerRef);
+  // Sync state lives in refs so socket callbacks always see the latest values
+  // (React state captured in closures would be stale).
+  const socketRef = useRef<Socket | null>(null);
+  const localRef = useRef(workspace.content ?? ""); // what the user sees
+  const baseRef = useRef(workspace.content ?? ""); // last content confirmed by the server
+  const versionRef = useRef(workspace.version ?? 1); // server version of baseRef
+  const inFlightRef = useRef(false);
+  const sendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  const onBackRef = useRef(onBack);
+  onBackRef.current = onBack;
+
+  usePresence(socket, workspace.id, containerRef);
 
   const connectionLabel = useMemo(() => {
     if (status === "connected") return dirty ? "Syncing..." : "Live";
@@ -32,25 +51,132 @@ export default function WorkspacePage({ token, workspace, onBack }: Props) {
     return "Offline";
   }, [status, dirty]);
 
+  /** Replace the visible text while keeping the user's caret where it belongs. */
+  const setLocal = useCallback((next: string, remap?: (i: number) => number) => {
+    const el = textareaRef.current;
+    if (el && remap && document.activeElement === el) {
+      pendingSelectionRef.current = {
+        start: remap(el.selectionStart),
+        end: remap(el.selectionEnd)
+      };
+    }
+    localRef.current = next;
+    setContent(next);
+  }, []);
+
+  useLayoutEffect(() => {
+    const sel = pendingSelectionRef.current;
+    const el = textareaRef.current;
+    if (sel && el) {
+      el.setSelectionRange(sel.start, sel.end);
+      pendingSelectionRef.current = null;
+    }
+  }, [content]);
+
+  const flush = useCallback(() => {
+    if (sendTimerRef.current) {
+      clearTimeout(sendTimerRef.current);
+      sendTimerRef.current = null;
+    }
+    const socket = socketRef.current;
+    if (!socket?.connected || inFlightRef.current) return;
+
+    const sent = localRef.current;
+    if (sent === baseRef.current) {
+      setDirty(false);
+      return;
+    }
+
+    inFlightRef.current = true;
+    socket
+      .timeout(ACK_TIMEOUT_MS)
+      .emit(
+        "workspace:update",
+        { workspaceId: workspace.id, content: sent, version: versionRef.current },
+        (err: Error | null, ack?: UpdateAck) => {
+          inFlightRef.current = false;
+          if (err || !ack) {
+            // No answer (timeout/disconnect). The reconnect sync will rebase and resend.
+            return;
+          }
+          if (ack.ok) {
+            baseRef.current = sent;
+            versionRef.current = ack.version;
+            setVersion(ack.version);
+            setError(null);
+          } else if (ack.reason === "conflict") {
+            applyServer(ack.content, ack.version);
+          } else if (ack.reason === "forbidden") {
+            setError("You no longer have access to this workspace.");
+            return;
+          } else if (ack.reason === "invalid") {
+            setError("This change could not be saved (the document may be too large).");
+            return;
+          } else {
+            setError("The server could not save your change. Retrying...");
+          }
+          // Send anything typed while this request was in flight.
+          if (localRef.current !== baseRef.current) scheduleSend();
+          else setDirty(false);
+        }
+      );
+  }, [workspace.id]);
+
+  const scheduleSend = useCallback(() => {
+    if (sendTimerRef.current) clearTimeout(sendTimerRef.current);
+    sendTimerRef.current = setTimeout(flush, SEND_DEBOUNCE_MS);
+  }, [flush]);
+
+  /**
+   * Adopt a newer server state. Unsent local edits are rebased on top of it
+   * rather than thrown away.
+   */
+  const applyServer = useCallback(
+    (serverContent: string, serverVersion: number) => {
+      if (serverVersion < versionRef.current) return; // stale message
+
+      const local = localRef.current;
+      const base = baseRef.current;
+      if (local === base) {
+        const { remoteSplice } = merge(local, local, serverContent);
+        setLocal(serverContent, (i) => transformIndex(i, remoteSplice));
+      } else {
+        const merged = merge(base, local, serverContent);
+        setLocal(merged.text, (i) => transformIndex(i, merged.remoteSplice));
+      }
+
+      baseRef.current = serverContent;
+      versionRef.current = serverVersion;
+      setVersion(serverVersion);
+
+      if (localRef.current !== baseRef.current) {
+        setDirty(true);
+        scheduleSend();
+      } else {
+        setDirty(false);
+      }
+    },
+    [scheduleSend, setLocal]
+  );
+
   useEffect(() => {
     const socket = createSocket(token);
     socketRef.current = socket;
+    setSocket(socket);
 
     socket.on("connect", () => {
       setStatus("connected");
+      setError(null);
+      // The server replies with workspace:sync, which rebases and resends any offline edits.
       socket.emit("workspace:join", { workspaceId: workspace.id });
-      if (dirty) {
-        socket.emit("workspace:update", {
-          workspaceId: workspace.id,
-          content,
-          version
-        });
-      }
     });
 
     socket.on("disconnect", () => {
+      inFlightRef.current = false;
       setStatus("disconnected");
     });
+
+    socket.io.on("reconnect_attempt", () => setStatus("connecting"));
 
     socket.on("connect_error", (err) => {
       setError(err.message);
@@ -59,50 +185,59 @@ export default function WorkspacePage({ token, workspace, onBack }: Props) {
 
     socket.on("workspace:sync", (payload) => {
       if (payload.workspaceId !== workspace.id) return;
-      setContent(payload.content);
-      setVersion(payload.version);
       setActivity(payload.activity ?? []);
-      setDirty(false);
+      applyServer(payload.content, payload.version);
     });
 
     socket.on("workspace:update", (payload) => {
       if (payload.workspaceId !== workspace.id) return;
-      setContent(payload.content);
-      setVersion(payload.version);
-      setDirty(false);
+      applyServer(payload.content, payload.version);
+    });
+
+    socket.on("workspace:removed", (payload) => {
+      if (payload.workspaceId !== workspace.id) return;
+      window.alert("This workspace was deleted or you were removed from it.");
+      onBackRef.current();
     });
 
     socket.on("presence:update", (payload) => {
       if (payload.workspaceId !== workspace.id) return;
-      setPresence(payload.users);
+      setPresence((prev) =>
+        payload.users.map((u: PresenceUser) => ({
+          ...u,
+          cursor: prev.find((p) => p.id === u.id)?.cursor ?? u.cursor ?? null
+        }))
+      );
     });
 
     socket.on("cursor:update", ({ userId, cursor }) => {
-      setPresence((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, cursor } : u))
-      );
+      setPresence((prev) => prev.map((u) => (u.id === userId ? { ...u, cursor } : u)));
     });
 
     socket.connect();
 
     return () => {
+      if (sendTimerRef.current) clearTimeout(sendTimerRef.current);
+      // Best effort: push any unsent text before leaving.
+      if (socket.connected && !inFlightRef.current && localRef.current !== baseRef.current) {
+        socket.emit("workspace:update", {
+          workspaceId: workspace.id,
+          content: localRef.current,
+          version: versionRef.current
+        });
+      }
       socket.emit("workspace:leave", { workspaceId: workspace.id });
       socket.disconnect();
+      socketRef.current = null;
+      setSocket(null);
     };
-  }, [token, workspace.id]);
+  }, [token, workspace.id, applyServer]);
 
   function handleChange(value: string) {
+    localRef.current = value;
     setContent(value);
     setDirty(true);
-    setError(null);
-    const socket = socketRef.current;
-    if (socket?.connected) {
-      socket.emit("workspace:update", {
-        workspaceId: workspace.id,
-        content: value,
-        version
-      });
-    }
+    scheduleSend();
   }
 
   async function handleInvite(event: React.FormEvent) {
@@ -126,7 +261,7 @@ export default function WorkspacePage({ token, workspace, onBack }: Props) {
   }
 
   return (
-    <div className="min-h-screen px-6 py-8 lg:px-16" ref={containerRef}>
+    <div className="relative min-h-screen px-6 py-8 lg:px-16" ref={containerRef}>
       <header className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
         <div>
           <button
@@ -155,7 +290,7 @@ export default function WorkspacePage({ token, workspace, onBack }: Props) {
         </div>
       </header>
 
-      <section className="mt-8 grid lg:grid-cols-[1.6fr_0.8fr] gap-8 relative">
+      <section className="mt-8 grid lg:grid-cols-[1.6fr_0.8fr] gap-8">
         {/* Render Remote Cursors */}
         {presence
           .filter((p) => p.cursor) // Filter users who have a cursor position
@@ -201,6 +336,7 @@ export default function WorkspacePage({ token, workspace, onBack }: Props) {
             </span>
           </div>
           <textarea
+            ref={textareaRef}
             className="w-full min-h-[420px] bg-ink/60 border border-white/10 rounded-xl p-4 text-fog focus:outline-none focus:ring-2 focus:ring-neon/40"
             value={content}
             onChange={(event) => handleChange(event.target.value)}

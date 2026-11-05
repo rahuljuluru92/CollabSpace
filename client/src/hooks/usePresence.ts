@@ -1,40 +1,41 @@
-import { useEffect, useRef, useCallback } from "react";
-import { throttle } from "lodash";
+import { useEffect, useMemo } from "react";
+import throttle from "lodash/throttle";
 import type { Socket } from "socket.io-client";
 
-type Cursor = { x: number; y: number };
-
+/** Broadcasts this user's mouse position (relative to `containerRef`) to the workspace. */
 export function usePresence(
-    socket: Socket | null,
-    workspaceId: string,
-    containerRef: React.RefObject<HTMLElement>
+  socket: Socket | null,
+  workspaceId: string,
+  containerRef: React.RefObject<HTMLElement>
 ) {
-    const onMouseMove = useCallback(
-        throttle((event: MouseEvent) => {
-            if (!socket || !containerRef.current) return;
+  const emitCursor = useMemo(
+    () =>
+      throttle((cursor: { x: number; y: number } | null) => {
+        socket?.emit("cursor:update", { workspaceId, cursor });
+      }, 50),
+    [socket, workspaceId]
+  );
 
-            const rect = containerRef.current.getBoundingClientRect();
-            const x = event.clientX - rect.left;
-            const y = event.clientY - rect.top;
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !socket) return;
 
-            const cursor: Cursor = { x, y };
-            socket.emit("cursor:update", { workspaceId, cursor });
-        }, 50),
-        [socket, workspaceId]
-    );
+    const onMouseMove = (event: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      emitCursor({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+    };
+    const onMouseLeave = () => {
+      emitCursor.cancel();
+      socket.emit("cursor:update", { workspaceId, cursor: null });
+    };
 
-    useEffect(() => {
-        const container = containerRef.current;
-        if (!container) return;
+    container.addEventListener("mousemove", onMouseMove);
+    container.addEventListener("mouseleave", onMouseLeave);
 
-        container.addEventListener("mousemove", onMouseMove);
-        container.addEventListener("mouseleave", () => {
-            socket?.emit("cursor:update", { workspaceId, cursor: null });
-        });
-
-        return () => {
-            container.removeEventListener("mousemove", onMouseMove);
-            onMouseMove.cancel();
-        };
-    }, [onMouseMove]);
+    return () => {
+      container.removeEventListener("mousemove", onMouseMove);
+      container.removeEventListener("mouseleave", onMouseLeave);
+      emitCursor.cancel();
+    };
+  }, [socket, workspaceId, containerRef, emitCursor]);
 }

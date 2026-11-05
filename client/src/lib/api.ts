@@ -2,6 +2,13 @@ import type { User, WorkspaceSummary, WorkspaceDetail } from "../types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function apiFetch<T>(path: string, options: RequestInit = {}, token?: string) {
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -15,7 +22,7 @@ async function apiFetch<T>(path: string, options: RequestInit = {}, token?: stri
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const message = body?.error ?? "Request failed";
-    throw new Error(message);
+    throw new ApiError(message, res.status);
   }
 
   return (await res.json()) as T;
@@ -68,7 +75,6 @@ export async function inviteMember(token: string, workspaceId: string, email: st
     token
   );
 }
-
 
 export async function deleteWorkspace(token: string, workspaceId: string) {
   return apiFetch<{ success: boolean; message: string }>(

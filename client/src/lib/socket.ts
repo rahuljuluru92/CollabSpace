@@ -9,3 +9,8 @@ export function createSocket(token: string): Socket {
     reconnection: true
   });
 }
+
+export type UpdateAck =
+  | { ok: true; version: number }
+  | { ok: false; reason: "conflict"; content: string; version: number }
+  | { ok: false; reason: "invalid" | "forbidden" | "error" };

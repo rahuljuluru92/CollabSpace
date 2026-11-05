@@ -3,7 +3,7 @@ import AuthPage from "./pages/AuthPage";
 import DashboardPage from "./pages/DashboardPage";
 import WorkspacePage from "./pages/WorkspacePage";
 import { clearSession, loadSession, saveSession } from "./lib/storage";
-import { createWorkspace, fetchWorkspaces } from "./lib/api";
+import { ApiError, createWorkspace, deleteWorkspace, fetchWorkspaces } from "./lib/api";
 import type { User, WorkspaceSummary } from "./types";
 
 export default function App() {
@@ -32,9 +32,19 @@ export default function App() {
     try {
       const data = await fetchWorkspaces(token);
       setWorkspaces(data.workspaces);
+    } catch (err) {
+      // Expired or invalid session: send the user back to sign in.
+      if (err instanceof ApiError && err.status === 401) handleLogout();
+      else console.error("Failed to load workspaces", err);
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleDeleteWorkspace(workspaceId: string) {
+    if (!token) return;
+    await deleteWorkspace(token, workspaceId);
+    await refreshWorkspaces();
   }
 
   function handleAuthenticated(nextToken: string, nextUser: User) {
@@ -72,6 +82,7 @@ export default function App() {
           onCreate={handleCreateWorkspace}
           onOpen={setActiveWorkspaceId}
           onRefresh={refreshWorkspaces}
+          onDelete={handleDeleteWorkspace}
           onLogout={handleLogout}
         />
       );
@@ -101,6 +112,7 @@ export default function App() {
         onCreate={handleCreateWorkspace}
         onOpen={setActiveWorkspaceId}
         onRefresh={refreshWorkspaces}
+        onDelete={handleDeleteWorkspace}
         onLogout={handleLogout}
       />
     </>

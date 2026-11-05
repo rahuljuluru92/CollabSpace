@@ -115,6 +115,8 @@ export default function AuthPage({ onAuthenticated }: Props) {
                 className="h-11 rounded-lg bg-white/10 border border-white/10 px-4 text-fog focus:outline-none focus:ring-2 focus:ring-neon/40"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+                minLength={mode === "register" ? 8 : undefined}
+                autoComplete={mode === "register" ? "new-password" : "current-password"}
                 required
               />
             </label>
