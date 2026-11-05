@@ -4,7 +4,9 @@ import { diff, merge, transformIndex } from "./textMerge";
 export type UpdateAck =
   | { ok: true; version: number }
   | { ok: false; reason: "conflict"; content: string; version: number }
-  | { ok: false; reason: "invalid" | "forbidden" | "error" };
+  | { ok: false; reason: "invalid" | "forbidden" | "error" }
+  /** Not applied; safe to retry shortly. */
+  | { ok: false; reason: "rate_limited" | "unavailable" };
 
 /** The parts of a workspace:sync payload the sync engine needs. */
 export type SyncState = {
@@ -39,6 +41,8 @@ export type DocSyncOptions = {
   debounceMs?: number;
   /** Reconnect if no workspace:sync arrives this long after joining. */
   syncTimeoutMs?: number;
+  /** Wait this long before retrying an edit the server asked us to retry. */
+  retryDelayMs?: number;
   createId?: () => string;
 };
 
@@ -76,6 +80,7 @@ export class DocSync {
   private disposed = false;
   private readonly debounceMs: number;
   private readonly syncTimeoutMs: number;
+  private readonly retryDelayMs: number;
   private readonly createId: () => string;
 
   constructor(
@@ -89,6 +94,7 @@ export class DocSync {
     this.version = initial.version;
     this.debounceMs = options.debounceMs ?? 150;
     this.syncTimeoutMs = options.syncTimeoutMs ?? 10_000;
+    this.retryDelayMs = options.retryDelayMs ?? 1_000;
     this.createId = options.createId ?? defaultId;
   }
 
@@ -174,9 +180,9 @@ export class DocSync {
     this.clearSyncTimer();
   }
 
-  private scheduleSend() {
+  private scheduleSend(delayMs = this.debounceMs) {
     this.clearSendTimer();
-    this.sendTimer = setTimeout(() => this.flush(), this.debounceMs);
+    this.sendTimer = setTimeout(() => this.flush(), delayMs);
   }
 
   private clearSendTimer() {
@@ -230,6 +236,9 @@ export class DocSync {
     } else if (ack.reason === "conflict") {
       // Someone else's edit landed first: rebase onto it and try again.
       this.applyServer(ack.content, ack.version);
+    } else if (ack.reason === "rate_limited" || ack.reason === "unavailable") {
+      // Not applied (server busy or restarting): try again shortly.
+      this.scheduleSend(this.retryDelayMs);
     } else {
       this.listener.onError(
         ack.reason === "forbidden"

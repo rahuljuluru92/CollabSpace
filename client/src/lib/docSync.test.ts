@@ -42,7 +42,7 @@ function setup(initial = { content: "", version: 1 }) {
         view.error = e;
       }
     },
-    { debounceMs: 100, syncTimeoutMs: 5000, createId: () => `e${++ids}` }
+    { debounceMs: 100, syncTimeoutMs: 5000, retryDelayMs: 1000, createId: () => `e${++ids}` }
   );
 
   /** The user types: update the view the way the textarea would, then tell the engine. */
@@ -264,6 +264,23 @@ describe("DocSync", () => {
     expect(t.view.error).toMatch(/no longer have access/);
     vi.advanceTimersByTime(1000);
     expect(t.sent).toHaveLength(1);
+  });
+
+  it("retries later when the server is busy or restarting", () => {
+    for (const reason of ["rate_limited", "unavailable"] as const) {
+      const t = setup();
+      t.ready();
+      t.type("x");
+      vi.advanceTimersByTime(100);
+      t.sent[0].done(null, { ok: false, reason });
+      expect(t.sync.hasUnsavedChanges).toBe(true);
+      vi.advanceTimersByTime(999);
+      expect(t.sent).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(t.sent).toHaveLength(2);
+      expect(t.sent[1].edit).toMatchObject({ content: "x", version: 1 });
+      expect(t.reconnects).toBe(0);
+    }
   });
 
   it("stops after dispose", () => {
