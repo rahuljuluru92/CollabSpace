@@ -24,12 +24,15 @@ describe("describeActivity", () => {
     );
     expect(
       describeActivity(
-        entry({ action: "member:invited", metadata: { invitedName: "Bob", invitedEmail: "b@x.io" } })
+        entry({
+          action: "member:invited",
+          metadata: { invitedName: "Bob", invitedEmail: "b@x.io" }
+        })
       )
     ).toBe("Alice invited Bob");
-    expect(describeActivity(entry({ action: "member:invited", metadata: { invitedEmail: "b@x.io" } }))).toBe(
-      "Alice invited b@x.io"
-    );
+    expect(
+      describeActivity(entry({ action: "member:invited", metadata: { invitedEmail: "b@x.io" } }))
+    ).toBe("Alice invited b@x.io");
   });
 
   it("copes with old entries that have no name", () => {

@@ -73,8 +73,12 @@ describe("socket handlers", () => {
     await once(b, "workspace:sync");
 
     const [ackA, ackB] = await Promise.all([
-      a.timeout(2000).emitWithAck("workspace:update", { workspaceId, content: "from A", version: 1 }),
-      b.timeout(2000).emitWithAck("workspace:update", { workspaceId, content: "from B", version: 1 })
+      a
+        .timeout(2000)
+        .emitWithAck("workspace:update", { workspaceId, content: "from A", version: 1 }),
+      b
+        .timeout(2000)
+        .emitWithAck("workspace:update", { workspaceId, content: "from B", version: 1 })
     ]);
     const oks = [ackA, ackB].filter((r) => r.ok);
     const conflicts = [ackA, ackB].filter((r) => !r.ok);
@@ -180,7 +184,10 @@ describe("socket handlers", () => {
     await api(ctx, `/api/workspaces/${workspaceId}`, { method: "DELETE", token: member.token });
     await removed;
     const { users } = await presence;
-    assert.deepEqual(users.map((u) => u.id), [owner.user.id]);
+    assert.deepEqual(
+      users.map((u) => u.id),
+      [owner.user.id]
+    );
 
     // Their cursor no longer reaches the room.
     const noCursor = notReceived(a, "cursor:update");
@@ -244,7 +251,9 @@ describe("socket handlers", () => {
     b.on("workspace:update", (u: { version: number }) => seen.push(u.version));
     const acks = await Promise.all(
       [1, 2, 3, 4, 5].map((v) =>
-        a.timeout(2000).emitWithAck("workspace:update", { workspaceId, content: `v${v}`, version: v })
+        a
+          .timeout(2000)
+          .emitWithAck("workspace:update", { workspaceId, content: `v${v}`, version: v })
       )
     );
     assert.deepEqual(

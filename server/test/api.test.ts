@@ -90,7 +90,9 @@ describe("platform", () => {
     assert.ok(res.headers.get("strict-transport-security"));
     assert.match(res.headers.get("x-request-id") ?? "", /^[0-9a-f-]{36}$/);
 
-    const echoed = await fetch(`${ctx.baseUrl}/health`, { headers: { "x-request-id": "trace-42" } });
+    const echoed = await fetch(`${ctx.baseUrl}/health`, {
+      headers: { "x-request-id": "trace-42" }
+    });
     assert.equal(echoed.headers.get("x-request-id"), "trace-42");
   });
 
@@ -157,7 +159,10 @@ describe("workspaces", () => {
     assert.equal(left.body.message, "Left workspace");
     assert.equal((await api(ctx, `/api/workspaces/${id}`, { token: other.token })).status, 403);
 
-    const deleted = await api(ctx, `/api/workspaces/${id}`, { method: "DELETE", token: owner.token });
+    const deleted = await api(ctx, `/api/workspaces/${id}`, {
+      method: "DELETE",
+      token: owner.token
+    });
     assert.equal(deleted.body.message, "Workspace deleted");
     assert.equal((await api(ctx, `/api/workspaces/${id}`, { token: owner.token })).status, 404);
   });

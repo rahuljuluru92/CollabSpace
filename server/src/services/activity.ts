@@ -20,7 +20,9 @@ export async function logActivity(params: {
     metadata: params.metadata
   });
   const workspaceId = params.workspaceId.toString();
-  getIo()?.to(workspaceId).emit("activity:new", { workspaceId, activity: serializeActivity(log) });
+  getIo()
+    ?.to(workspaceId)
+    .emit("activity:new", { workspaceId, activity: serializeActivity(log) });
   return log;
 }
 
@@ -37,7 +39,8 @@ export async function activityPage(
   const last = page[page.length - 1];
   return {
     activity: page.map(serializeActivity),
-    nextCursor: rows.length > limit && last ? encodeCursor(last.createdAt, last._id.toString()) : null
+    nextCursor:
+      rows.length > limit && last ? encodeCursor(last.createdAt, last._id.toString()) : null
   };
 }
 

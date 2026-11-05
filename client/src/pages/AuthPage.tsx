@@ -21,9 +21,7 @@ export default function AuthPage({ onAuthenticated }: Props) {
     setLoading(true);
     try {
       const payload =
-        mode === "login"
-          ? await login(email, password)
-          : await register(name, email, password);
+        mode === "login" ? await login(email, password) : await register(name, email, password);
       saveSession(payload);
       onAuthenticated(payload.token, payload.user);
     } catch (err) {
@@ -37,9 +35,7 @@ export default function AuthPage({ onAuthenticated }: Props) {
     <div className="min-h-screen grid lg:grid-cols-[1.1fr_0.9fr]">
       <section className="p-10 lg:p-16 flex flex-col justify-between">
         <div>
-          <p className="text-sm uppercase tracking-[0.3em] text-neon font-medium">
-            SyncSpace
-          </p>
+          <p className="text-sm uppercase tracking-[0.3em] text-neon font-medium">SyncSpace</p>
           <h1 className="mt-6 text-4xl lg:text-5xl font-display font-semibold text-fog">
             Real-time collaboration, with the server as the single source of truth.
           </h1>

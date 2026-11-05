@@ -14,7 +14,11 @@ describe("loadConfig", () => {
   it("rejects a bad rate-limit setting", () => {
     assert.throws(
       () =>
-        loadConfig({ MONGO_URI: "m", JWT_SECRET: "x", AUTH_RATE_LIMIT_MAX: "0" } as NodeJS.ProcessEnv),
+        loadConfig({
+          MONGO_URI: "m",
+          JWT_SECRET: "x",
+          AUTH_RATE_LIMIT_MAX: "0"
+        } as NodeJS.ProcessEnv),
       /AUTH_RATE_LIMIT_MAX/
     );
   });
@@ -42,7 +46,12 @@ describe("loadConfig", () => {
     const base = { MONGO_URI: "m", NODE_ENV: "production", CLIENT_ORIGIN: "https://app.example" };
     assert.throws(() => loadConfig({ ...base, JWT_SECRET: "short" } as NodeJS.ProcessEnv), /32/);
     assert.throws(
-      () => loadConfig({ ...base, JWT_SECRET: "x".repeat(40), CLIENT_ORIGIN: "*" } as NodeJS.ProcessEnv),
+      () =>
+        loadConfig({
+          ...base,
+          JWT_SECRET: "x".repeat(40),
+          CLIENT_ORIGIN: "*"
+        } as NodeJS.ProcessEnv),
       /\*/
     );
     const ok = loadConfig({
@@ -206,6 +215,9 @@ describe("pagination", () => {
     assert.equal(decodeCursor("nonsense"), null);
     assert.equal(decodeCursor(""), null);
     assert.equal(decodeCursor(["x"]), null);
-    assert.equal(decodeCursor(Buffer.from("abc:507f1f77bcf86cd799439011").toString("base64url")), null);
+    assert.equal(
+      decodeCursor(Buffer.from("abc:507f1f77bcf86cd799439011").toString("base64url")),
+      null
+    );
   });
 });

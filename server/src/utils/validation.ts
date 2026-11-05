@@ -22,7 +22,9 @@ export function isNonEmptyString(value: unknown, max: number): value is string {
 }
 
 export function isEmail(value: unknown): value is string {
-  return typeof value === "string" && value.length <= LIMITS.emailMax && EMAIL_RE.test(value.trim());
+  return (
+    typeof value === "string" && value.length <= LIMITS.emailMax && EMAIL_RE.test(value.trim())
+  );
 }
 
 export function normalizeEmail(email: string) {

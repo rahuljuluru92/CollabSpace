@@ -94,7 +94,11 @@ export async function registerUser(ctx: TestContext, name = "User") {
 }
 
 export async function connectSocket(ctx: TestContext, token: string): Promise<ClientSocket> {
-  const socket = ioClient(ctx.baseUrl, { auth: { token }, transports: ["websocket"], forceNew: true });
+  const socket = ioClient(ctx.baseUrl, {
+    auth: { token },
+    transports: ["websocket"],
+    forceNew: true
+  });
   await new Promise<void>((resolve, reject) => {
     socket.once("connect", () => resolve());
     socket.once("connect_error", reject);

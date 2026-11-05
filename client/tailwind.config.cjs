@@ -12,8 +12,8 @@ module.exports = {
         coral: "#fb7185"
       },
       fontFamily: {
-        display: ["\"Space Grotesk\"", "system-ui", "sans-serif"],
-        body: ["\"IBM Plex Sans\"", "system-ui", "sans-serif"]
+        display: ['"Space Grotesk"', "system-ui", "sans-serif"],
+        body: ['"IBM Plex Sans"', "system-ui", "sans-serif"]
       },
       boxShadow: {
         glow: "0 0 40px rgba(34, 211, 238, 0.35)"

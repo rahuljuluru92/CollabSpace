@@ -208,7 +208,11 @@ export class DocSync {
       this.listener.onDirty(false);
       return;
     }
-    const edit: OutgoingEdit = { editId: this.createId(), content: this.local, version: this.version };
+    const edit: OutgoingEdit = {
+      editId: this.createId(),
+      content: this.local,
+      version: this.version
+    };
     this.inFlight = edit;
     this.transport.sendEdit(edit, (err, ack) => this.handleAck(edit, err, ack));
   }

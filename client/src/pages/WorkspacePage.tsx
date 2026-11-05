@@ -470,9 +470,7 @@ export default function WorkspacePage({
               {activity.map((item) => (
                 <li key={item.id} className="border-b border-white/10 pb-2">
                   <p className="text-fog/80">{describeActivity(item)}</p>
-                  <p className="text-xs text-fog/50">
-                    {new Date(item.createdAt).toLocaleString()}
-                  </p>
+                  <p className="text-xs text-fog/50">{new Date(item.createdAt).toLocaleString()}</p>
                 </li>
               ))}
             </ul>
