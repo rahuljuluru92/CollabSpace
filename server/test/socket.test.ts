@@ -10,6 +10,7 @@ import {
   TestContext
 } from "./helpers";
 import { ActivityLog } from "../src/models/ActivityLog";
+import { lifecycle } from "../src/lifecycle";
 
 let ctx: TestContext;
 
@@ -254,6 +255,68 @@ describe("socket handlers", () => {
     assert.deepEqual(seen, [2, 3, 4, 5, 6]);
     a.disconnect();
     b.disconnect();
+  });
+
+  it("pushes new activity live, with the actor's name", async () => {
+    const { owner, member, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    a.emit("workspace:join", { workspaceId });
+    const sync = await once(a, "workspace:sync");
+    assert.equal(sync.activityCursor, null);
+    assert.ok(sync.activity.some((e: { userName: string }) => e.userName === "Owner"));
+
+    const live = once<{ workspaceId: string; activity: { action: string; userName: string } }>(
+      a,
+      "activity:new"
+    );
+    const b = await connectSocket(ctx, member.token);
+    b.emit("workspace:join", { workspaceId });
+    const { activity } = await live;
+    assert.equal(activity.action, "presence:joined");
+    assert.equal(activity.userName, "Member");
+    a.disconnect();
+    b.disconnect();
+  });
+
+  it("rate-limits a client that floods edits", async () => {
+    const { owner, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+
+    const acks = await Promise.all(
+      Array.from({ length: 30 }, (_, i) =>
+        a
+          .timeout(5000)
+          .emitWithAck("workspace:update", { workspaceId, content: `v${i + 1}`, version: i + 1 })
+      )
+    );
+    const ok = acks.filter((x) => x.ok).length;
+    const limited = acks.filter((x) => !x.ok && x.reason === "rate_limited").length;
+    assert.ok(limited >= 5, `expected some rate-limited edits, got ${limited}`);
+    const ws = await api(ctx, `/api/workspaces/${workspaceId}`, { token: owner.token });
+    assert.equal(ws.body.workspace.version, 1 + ok); // rate-limited edits were not applied
+    a.disconnect();
+  });
+
+  it("refuses edits while shutting down, so clients can retry elsewhere", async () => {
+    const { owner, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+
+    lifecycle.beginShutdown();
+    try {
+      const ack = await a
+        .timeout(2000)
+        .emitWithAck("workspace:update", { workspaceId, content: "late", version: 1 });
+      assert.deepEqual(ack, { ok: false, reason: "unavailable" });
+    } finally {
+      lifecycle.reset();
+    }
+    const ws = await api(ctx, `/api/workspaces/${workspaceId}`, { token: owner.token });
+    assert.equal(ws.body.workspace.version, 1);
+    a.disconnect();
   });
 
   it("lists a user once in presence even with two tabs open", async () => {

@@ -1,6 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { api, registerUser, startTestServer, TestContext } from "./helpers";
+import { lifecycle } from "../src/lifecycle";
 
 let ctx: TestContext;
 
@@ -82,6 +83,33 @@ describe("auth", () => {
   });
 });
 
+describe("platform", () => {
+  it("sends security headers and a request id", async () => {
+    const res = await fetch(`${ctx.baseUrl}/health`);
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.ok(res.headers.get("strict-transport-security"));
+    assert.match(res.headers.get("x-request-id") ?? "", /^[0-9a-f-]{36}$/);
+
+    const echoed = await fetch(`${ctx.baseUrl}/health`, { headers: { "x-request-id": "trace-42" } });
+    assert.equal(echoed.headers.get("x-request-id"), "trace-42");
+  });
+
+  it("reports readiness, including during shutdown", async () => {
+    const ready = await api(ctx, "/health/ready");
+    assert.equal(ready.status, 200);
+    assert.deepEqual(ready.body, { ok: true, db: "up", shuttingDown: false });
+
+    lifecycle.beginShutdown();
+    try {
+      const draining = await api(ctx, "/health/ready");
+      assert.equal(draining.status, 503);
+      assert.equal(draining.body.shuttingDown, true);
+    } finally {
+      lifecycle.reset();
+    }
+  });
+});
+
 describe("workspaces", () => {
   it("requires a valid token", async () => {
     assert.equal((await api(ctx, "/api/workspaces")).status, 401);
@@ -132,5 +160,82 @@ describe("workspaces", () => {
     const deleted = await api(ctx, `/api/workspaces/${id}`, { method: "DELETE", token: owner.token });
     assert.equal(deleted.body.message, "Workspace deleted");
     assert.equal((await api(ctx, `/api/workspaces/${id}`, { token: owner.token })).status, 404);
+  });
+
+  it("paginates the workspace list newest first, with short previews", async () => {
+    const { token } = await registerUser(ctx, "Pager");
+    const long = "x".repeat(1000);
+    for (let i = 1; i <= 5; i++) {
+      const res = await api(ctx, "/api/workspaces", {
+        method: "POST",
+        token,
+        body: { name: `WS ${i}`, content: i === 5 ? long : "short" }
+      });
+      assert.equal(res.status, 201);
+    }
+
+    const names: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const query: string = cursor ? `?limit=2&cursor=${cursor}` : "?limit=2";
+      const res = await api(ctx, `/api/workspaces${query}`, { token });
+      assert.equal(res.status, 200);
+      assert.ok(res.body.workspaces.length <= 2);
+      for (const ws of res.body.workspaces) {
+        assert.equal(ws.content, undefined);
+        assert.ok(ws.preview.length <= 280);
+        names.push(ws.name);
+      }
+      cursor = res.body.nextCursor;
+      pages += 1;
+    } while (cursor && pages < 10);
+
+    assert.deepEqual(names, ["WS 5", "WS 4", "WS 3", "WS 2", "WS 1"]);
+    assert.equal(pages, 3);
+
+    const bad = await api(ctx, "/api/workspaces?cursor=nonsense", { token });
+    assert.equal(bad.status, 400);
+  });
+
+  it("pages through activity with names, members only", async () => {
+    const owner = await registerUser(ctx, "Olive");
+    const others = [await registerUser(ctx, "P1"), await registerUser(ctx, "P2")];
+    const created = await api(ctx, "/api/workspaces", {
+      method: "POST",
+      token: owner.token,
+      body: { name: "Log" }
+    });
+    const id = created.body.workspace.id as string;
+    for (const o of others) {
+      await api(ctx, `/api/workspaces/${id}/invite`, {
+        method: "POST",
+        token: owner.token,
+        body: { email: o.user.email }
+      });
+    }
+
+    // created + 2 invites = 3 entries
+    const first = await api(ctx, `/api/workspaces/${id}/activity?limit=2`, { token: owner.token });
+    assert.equal(first.status, 200);
+    assert.equal(first.body.activity.length, 2);
+    assert.equal(first.body.activity[0].action, "member:invited");
+    assert.equal(first.body.activity[0].userName, "Olive");
+    assert.ok(first.body.nextCursor);
+
+    const second = await api(
+      ctx,
+      `/api/workspaces/${id}/activity?limit=2&before=${first.body.nextCursor}`,
+      { token: owner.token }
+    );
+    assert.equal(second.body.activity.length, 1);
+    assert.equal(second.body.activity[0].action, "workspace:created");
+    assert.equal(second.body.nextCursor, null);
+
+    const outsider = await registerUser(ctx, "Out");
+    const denied = await api(ctx, `/api/workspaces/${id}/activity`, { token: outsider.token });
+    assert.equal(denied.status, 403);
+    const bad = await api(ctx, `/api/workspaces/${id}/activity?before=zzz`, { token: owner.token });
+    assert.equal(bad.status, 400);
   });
 });

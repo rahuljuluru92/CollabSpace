@@ -1,30 +1,80 @@
 import { Request, Response } from "express";
-import { Workspace, WorkspaceDocument } from "../models/Workspace";
+import { Types } from "mongoose";
+import { Workspace } from "../models/Workspace";
 import { User } from "../models/User";
-import { ActivityLog, ActivityLogDocument } from "../models/ActivityLog";
-import { logActivity } from "../services/activity";
+import { ActivityLog } from "../models/ActivityLog";
+import { activityPage, logActivity } from "../services/activity";
 import {
+  PREVIEW_LENGTH,
   isWorkspaceMember,
-  serializeActivity,
-  serializeWorkspace
+  serializeWorkspace,
+  serializeWorkspaceSummary
 } from "../services/workspaceSerializer";
 import { evictFromWorkspace } from "../sockets/registry";
-import { LIMITS, isEmail, isNonEmptyString, isValidContent, normalizeEmail } from "../utils/validation";
+import {
+  LIMITS,
+  isEmail,
+  isNonEmptyString,
+  isValidContent,
+  normalizeEmail
+} from "../utils/validation";
+import { afterCursor, decodeCursor, encodeCursor, parseLimit } from "../utils/pagination";
 
+/** GET /api/workspaces?limit=&cursor= : newest first, with a cursor for the next page. */
 export async function listWorkspaces(req: Request, res: Response) {
   const userId = req.user!.id;
-  const workspaces = await Workspace.find({
-    $or: [{ ownerId: userId }, { members: userId }]
-  })
-    .select("-recentEdits")
-    .sort({ updatedAt: -1 })
-    .lean<WorkspaceDocument[]>();
+  const limit = parseLimit(req.query.limit, 30, 100);
+  const cursor = req.query.cursor === undefined ? null : decodeCursor(req.query.cursor);
+  if (req.query.cursor !== undefined && !cursor) {
+    return res.status(400).json({ error: "Invalid cursor" });
+  }
 
-  return res.json({ workspaces: workspaces.map(serializeWorkspace) });
+  // The owner is always in `members`, so this covers owned and shared workspaces.
+  const match: Record<string, unknown> = { members: new Types.ObjectId(userId) };
+  if (cursor) {
+    // Aggregation does not cast types, so the _id must be an ObjectId here.
+    match.$or = [
+      { updatedAt: { $lt: cursor.at } },
+      { updatedAt: cursor.at, _id: { $lt: new Types.ObjectId(cursor.id) } }
+    ];
+  }
+
+  const rows = await Workspace.aggregate<{
+    _id: Types.ObjectId;
+    name: string;
+    ownerId: Types.ObjectId;
+    members: Types.ObjectId[];
+    version: number;
+    updatedAt: Date;
+    preview: string;
+  }>([
+    { $match: match },
+    { $sort: { updatedAt: -1, _id: -1 } },
+    { $limit: limit + 1 },
+    {
+      $project: {
+        name: 1,
+        ownerId: 1,
+        members: 1,
+        version: 1,
+        updatedAt: 1,
+        // Only a preview: a page of 200k-character documents would be megabytes.
+        preview: { $substrCP: ["$content", 0, PREVIEW_LENGTH] }
+      }
+    }
+  ]);
+
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return res.json({
+    workspaces: page.map(serializeWorkspaceSummary),
+    nextCursor:
+      rows.length > limit && last ? encodeCursor(last.updatedAt, last._id.toString()) : null
+  });
 }
 
 export async function createWorkspace(req: Request, res: Response) {
-  const userId = req.user!.id;
+  const { id: userId, name: userName } = req.user!;
   const { name, content } = (req.body ?? {}) as Record<string, unknown>;
 
   if (!isNonEmptyString(name, LIMITS.workspaceNameMax)) {
@@ -47,46 +97,62 @@ export async function createWorkspace(req: Request, res: Response) {
   await logActivity({
     workspaceId: workspace._id,
     userId,
+    userName,
     action: "workspace:created"
   });
 
-  return res.status(201).json({ workspace: serializeWorkspace(workspace) });
+  return res.status(201).json({ workspace: serializeWorkspaceSummary(workspace) });
 }
 
+/** GET /api/workspaces/:id : the full workspace (content included). */
 export async function getWorkspace(req: Request, res: Response) {
   const userId = req.user!.id;
-  const workspaceId = req.params.id;
 
-  const workspace = await Workspace.findById(workspaceId);
+  const workspace = await Workspace.findById(req.params.id).select("-recentEdits");
   if (!workspace) {
     return res.status(404).json({ error: "Workspace not found" });
   }
-
   if (!isWorkspaceMember(userId, workspace)) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
-  const activity = await ActivityLog.find({ workspaceId })
-    .sort({ createdAt: -1 })
-    .limit(25)
-    .lean<ActivityLogDocument[]>();
+  return res.json({ workspace: serializeWorkspace(workspace) });
+}
 
-  return res.json({
-    workspace: serializeWorkspace(workspace),
-    activity: activity.map(serializeActivity)
-  });
+/** GET /api/workspaces/:id/activity?before=&limit= : older activity, newest first. */
+export async function listActivity(req: Request, res: Response) {
+  const userId = req.user!.id;
+
+  const workspace = await Workspace.findById(req.params.id).select("ownerId members");
+  if (!workspace) {
+    return res.status(404).json({ error: "Workspace not found" });
+  }
+  if (!isWorkspaceMember(userId, workspace)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const limit = parseLimit(req.query.limit, 25, 100);
+  const before = req.query.before === undefined ? null : decodeCursor(req.query.before);
+  if (req.query.before !== undefined && !before) {
+    return res.status(400).json({ error: "Invalid cursor" });
+  }
+
+  const filter = {
+    workspaceId: workspace._id,
+    ...(before ? afterCursor("createdAt", before) : {})
+  };
+  return res.json(await activityPage(filter, limit));
 }
 
 export async function inviteMember(req: Request, res: Response) {
-  const userId = req.user!.id;
-  const workspaceId = req.params.id;
+  const { id: userId, name: userName } = req.user!;
   const { email } = (req.body ?? {}) as Record<string, unknown>;
 
   if (!isEmail(email)) {
     return res.status(400).json({ error: "A valid email is required" });
   }
 
-  const workspace = await Workspace.findById(workspaceId);
+  const workspace = await Workspace.findById(req.params.id).select("ownerId members");
   if (!workspace) {
     return res.status(404).json({ error: "Workspace not found" });
   }
@@ -113,8 +179,9 @@ export async function inviteMember(req: Request, res: Response) {
     await logActivity({
       workspaceId: workspace._id,
       userId,
+      userName,
       action: "member:invited",
-      metadata: { invitedUserId: user.id, invitedEmail: user.email }
+      metadata: { invitedUserId: user.id, invitedName: user.name, invitedEmail: user.email }
     });
   }
 
@@ -125,10 +192,10 @@ export async function inviteMember(req: Request, res: Response) {
 }
 
 export async function deleteWorkspace(req: Request, res: Response) {
-  const userId = req.user!.id;
+  const { id: userId, name: userName } = req.user!;
   const workspaceId = req.params.id as string;
 
-  const workspace = await Workspace.findById(workspaceId);
+  const workspace = await Workspace.findById(workspaceId).select("ownerId members");
   if (!workspace) {
     return res.status(404).json({ error: "Workspace not found" });
   }
@@ -151,6 +218,7 @@ export async function deleteWorkspace(req: Request, res: Response) {
     await logActivity({
       workspaceId: workspace._id,
       userId,
+      userName,
       action: "member:left"
     });
     await evictFromWorkspace(workspaceId, userId);

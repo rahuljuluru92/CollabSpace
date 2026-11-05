@@ -21,3 +21,8 @@ export function runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
   });
   return result;
 }
+
+/** Resolves once every task queued so far (under any key) has finished. */
+export async function drain() {
+  await Promise.all(Array.from(tails.values()));
+}

@@ -5,6 +5,7 @@ import {
   deleteWorkspace,
   getWorkspace,
   inviteMember,
+  listActivity,
   listWorkspaces
 } from "../controllers/workspaceController";
 import { isObjectId } from "../utils/validation";
@@ -23,6 +24,7 @@ router.use(requireAuth);
 router.get("/", listWorkspaces);
 router.post("/", createWorkspace);
 router.get("/:id", validateId, getWorkspace);
+router.get("/:id/activity", validateId, listActivity);
 router.post("/:id/invite", validateId, inviteMember);
 router.delete("/:id", validateId, deleteWorkspace);
 

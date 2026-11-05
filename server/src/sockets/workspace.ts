@@ -1,12 +1,14 @@
 import { Server, Socket } from "socket.io";
 import { Workspace, WorkspaceDocument } from "../models/Workspace";
-import { ActivityLog, ActivityLogDocument } from "../models/ActivityLog";
-import { logActivity, shouldLogEdit } from "../services/activity";
-import { isWorkspaceMember, serializeActivity } from "../services/workspaceSerializer";
+import { activityPage, logActivity, shouldLogEdit } from "../services/activity";
+import { isWorkspaceMember } from "../services/workspaceSerializer";
 import { PresenceUpdatePayload, UpdateAck, WorkspaceSyncPayload } from "../types/events";
 import { presenceJoin, presenceLeave, presenceUpdateCursor } from "./presence";
 import { runExclusive } from "./lock";
+import { tokenBucket } from "./rateLimit";
 import { isEditId, isObjectId, isValidContent, isValidCursor } from "../utils/validation";
+import { lifecycle } from "../lifecycle";
+import { logger } from "../logger";
 
 type Ack = (response: unknown) => void;
 
@@ -28,7 +30,7 @@ function safeHandler(
     try {
       await handler(payload, ack);
     } catch (err) {
-      console.error(`Socket handler "${event}" failed for user ${socket.user?.id}:`, err);
+      logger.error({ err, event, userId: socket.user?.id }, "Socket handler failed");
       ack?.({ ok: false, reason: "error" });
     }
   });
@@ -45,10 +47,7 @@ async function buildSync(
   workspace: WorkspaceDocument,
   pendingEditId: string | null = null
 ): Promise<WorkspaceSyncPayload> {
-  const activity = await ActivityLog.find({ workspaceId: workspace._id })
-    .sort({ createdAt: -1 })
-    .limit(25)
-    .lean<ActivityLogDocument[]>();
+  const { activity, nextCursor } = await activityPage({ workspaceId: workspace._id }, 25);
 
   return {
     workspaceId: workspace.id,
@@ -61,14 +60,23 @@ async function buildSync(
           pendingEditApplied: (workspace.recentEdits ?? []).some((e) => e.editId === pendingEditId)
         }
       : {}),
-    activity: activity.map(serializeActivity)
+    activity,
+    activityCursor: nextCursor
   };
 }
 
 export default function workspaceSocket(io: Server, socket: Socket) {
   socket.data.userId = socket.user.id;
 
+  // Per-connection limits, far above what the real client sends (it debounces
+  // edits and sends one at a time, and throttles cursors to 20/s).
+  const allowJoin = tokenBucket(1, 5);
+  const allowUpdate = tokenBucket(10, 20);
+  const allowCursor = tokenBucket(30, 30);
+
   safeHandler(socket, "workspace:join", async (payload) => {
+    // While shutting down, the connection is about to close; the client rejoins elsewhere.
+    if (lifecycle.isShuttingDown() || !allowJoin()) return;
     const workspaceId = readWorkspaceId(payload);
     if (!workspaceId) return;
     const rawPending = (payload as { pendingEditId?: unknown }).pendingEditId;
@@ -101,6 +109,7 @@ export default function workspaceSocket(io: Server, socket: Socket) {
         await logActivity({
           workspaceId: workspace._id,
           userId: socket.user.id,
+          userName: socket.user.name,
           action: "presence:joined"
         });
       }
@@ -110,6 +119,15 @@ export default function workspaceSocket(io: Server, socket: Socket) {
   });
 
   safeHandler(socket, "workspace:update", async (payload, ack) => {
+    // Known not applied, so the client can simply retry (here or on the next server).
+    if (lifecycle.isShuttingDown()) {
+      ack?.({ ok: false, reason: "unavailable" } satisfies UpdateAck);
+      return;
+    }
+    if (!allowUpdate()) {
+      ack?.({ ok: false, reason: "rate_limited" } satisfies UpdateAck);
+      return;
+    }
     const workspaceId = readWorkspaceId(payload);
     const { content, version, editId } = (payload ?? {}) as {
       content?: unknown;
@@ -192,6 +210,7 @@ export default function workspaceSocket(io: Server, socket: Socket) {
       await logActivity({
         workspaceId: applied._id,
         userId,
+        userName: socket.user.name,
         action: "workspace:updated",
         metadata: { version: applied.version }
       });
@@ -199,6 +218,7 @@ export default function workspaceSocket(io: Server, socket: Socket) {
   });
 
   safeHandler(socket, "cursor:update", (payload) => {
+    if (!allowCursor()) return;
     const workspaceId = readWorkspaceId(payload);
     const cursor = (payload as { cursor?: unknown } | null)?.cursor ?? null;
     // Only sockets that passed the membership check in workspace:join are in the room.
@@ -221,6 +241,7 @@ export default function workspaceSocket(io: Server, socket: Socket) {
     await logActivity({
       workspaceId,
       userId: socket.user.id,
+      userName: socket.user.name,
       action: "presence:left"
     });
   });

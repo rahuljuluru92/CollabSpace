@@ -4,7 +4,9 @@ import { loadConfig } from "../src/config/env";
 import { isEmail, isObjectId, isValidCursor } from "../src/utils/validation";
 import { presenceJoin, presenceLeave, presenceReset } from "../src/sockets/presence";
 import { shouldLogEdit } from "../src/services/activity";
-import { runExclusive } from "../src/sockets/lock";
+import { drain, runExclusive } from "../src/sockets/lock";
+import { tokenBucket } from "../src/sockets/rateLimit";
+import { decodeCursor, encodeCursor, parseLimit } from "../src/utils/pagination";
 import { rateLimit } from "../src/middleware/rateLimit";
 import type { Request, Response } from "express";
 
@@ -158,5 +160,52 @@ describe("rateLimit", () => {
       [200, 200, 429]
     );
     assert.equal(hit(limiter, "2.2.2.2"), 200);
+  });
+});
+
+describe("drain", () => {
+  it("waits for every queued task", async () => {
+    let done = 0;
+    for (const key of ["a", "b", "a"]) {
+      void runExclusive(`drain-${key}`, async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        done += 1;
+      });
+    }
+    await drain();
+    assert.equal(done, 3);
+  });
+});
+
+describe("tokenBucket", () => {
+  it("allows a burst, then refills over time", () => {
+    let now = 0;
+    const allow = tokenBucket(10, 3, () => now);
+    assert.deepEqual([allow(), allow(), allow(), allow()], [true, true, true, false]);
+    now += 100; // 0.1s at 10/s = one token
+    assert.equal(allow(), true);
+    assert.equal(allow(), false);
+    now += 10_000; // never more than the burst
+    assert.deepEqual([allow(), allow(), allow(), allow()], [true, true, true, false]);
+  });
+});
+
+describe("pagination", () => {
+  it("parses limits with a fallback and a cap", () => {
+    assert.equal(parseLimit(undefined, 25, 100), 25);
+    assert.equal(parseLimit("10", 25, 100), 10);
+    assert.equal(parseLimit("1000", 25, 100), 100);
+    assert.equal(parseLimit("-1", 25, 100), 25);
+    assert.equal(parseLimit(["5"], 25, 100), 25);
+  });
+
+  it("round-trips cursors and rejects garbage", () => {
+    const at = new Date("2026-01-02T03:04:05.678Z");
+    const id = "507f1f77bcf86cd799439011";
+    assert.deepEqual(decodeCursor(encodeCursor(at, id)), { at, id });
+    assert.equal(decodeCursor("nonsense"), null);
+    assert.equal(decodeCursor(""), null);
+    assert.equal(decodeCursor(["x"]), null);
+    assert.equal(decodeCursor(Buffer.from("abc:507f1f77bcf86cd799439011").toString("base64url")), null);
   });
 });

@@ -3,6 +3,7 @@ import { Server, Socket } from "socket.io";
 import { socketAuth } from "../middleware/socketAuth";
 import workspaceSocket from "./workspace";
 import { setIo } from "./registry";
+import { logger } from "../logger";
 
 export default function setupSockets(httpServer: HttpServer, corsOrigins: string[]) {
   const io = new Server(httpServer, {
@@ -15,6 +16,10 @@ export default function setupSockets(httpServer: HttpServer, corsOrigins: string
   io.use(socketAuth);
 
   io.on("connection", (socket: Socket) => {
+    logger.debug({ socketId: socket.id, userId: socket.user.id }, "Socket connected");
+    socket.on("disconnect", (reason) => {
+      logger.debug({ socketId: socket.id, userId: socket.user.id, reason }, "Socket disconnected");
+    });
     workspaceSocket(io, socket);
   });
 

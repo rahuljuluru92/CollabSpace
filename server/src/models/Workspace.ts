@@ -37,8 +37,9 @@ const workspaceSchema = new Schema<WorkspaceDocument>(
   { timestamps: { createdAt: false, updatedAt: true } }
 );
 
-// Serves the "my workspaces" listing ($or on owner/members).
 workspaceSchema.index({ ownerId: 1 });
-workspaceSchema.index({ members: 1 });
+// Serves the paginated "my workspaces" listing (newest first). The owner is
+// always in `members`, so this one index covers owned and shared workspaces.
+workspaceSchema.index({ members: 1, updatedAt: -1, _id: -1 });
 
 export const Workspace = mongoose.model<WorkspaceDocument>("Workspace", workspaceSchema);

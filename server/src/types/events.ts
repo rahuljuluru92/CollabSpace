@@ -17,7 +17,9 @@ export interface WorkspaceUpdatePayload {
 export type UpdateAck =
   | { ok: true; version: number }
   | { ok: false; reason: "conflict"; content: string; version: number }
-  | { ok: false; reason: "invalid" | "forbidden" | "error" };
+  | { ok: false; reason: "invalid" | "forbidden" | "error" }
+  /** Not applied; safe to retry shortly. */
+  | { ok: false; reason: "rate_limited" | "unavailable" };
 
 export interface CursorPayload {
   workspaceId: string;
@@ -32,13 +34,16 @@ export interface WorkspaceSyncPayload {
   /** Echo of the join's pendingEditId, with whether that edit was applied. */
   pendingEditId?: string;
   pendingEditApplied?: boolean;
+  /** Latest activity, newest first; `activityCursor` fetches older entries via REST. */
   activity: {
     id: string;
     action: string;
     userId: string;
+    userName: string | null;
     metadata: Record<string, unknown>;
     createdAt: string;
   }[];
+  activityCursor: string | null;
 }
 
 export interface PresenceUpdatePayload {
