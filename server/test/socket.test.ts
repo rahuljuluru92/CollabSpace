@@ -1,0 +1,201 @@
+import { after, before, describe, it } from "node:test";
+import assert from "node:assert/strict";
+import {
+  api,
+  connectSocket,
+  notReceived,
+  once,
+  registerUser,
+  startTestServer,
+  TestContext
+} from "./helpers";
+import { ActivityLog } from "../src/models/ActivityLog";
+
+let ctx: TestContext;
+
+before(async () => {
+  ctx = await startTestServer();
+});
+after(async () => {
+  await ctx.close();
+});
+
+async function setupWorkspace() {
+  const owner = await registerUser(ctx, "Owner");
+  const member = await registerUser(ctx, "Member");
+  const outsider = await registerUser(ctx, "Outsider");
+  const created = await api(ctx, "/api/workspaces", {
+    method: "POST",
+    token: owner.token,
+    body: { name: "Doc" }
+  });
+  const workspaceId = created.body.workspace.id as string;
+  await api(ctx, `/api/workspaces/${workspaceId}/invite`, {
+    method: "POST",
+    token: owner.token,
+    body: { email: member.user.email }
+  });
+  return { owner, member, outsider, workspaceId };
+}
+
+describe("socket handlers", () => {
+  it("rejects connections without a valid token", async () => {
+    await assert.rejects(connectSocket(ctx, "bad-token"));
+  });
+
+  it("survives malformed payloads (no crash)", async () => {
+    const { token } = await registerUser(ctx);
+    const socket = await connectSocket(ctx, token);
+    socket.emit("workspace:join", { workspaceId: "x" });
+    socket.emit("workspace:join", null);
+    socket.emit("workspace:update", { workspaceId: "x", content: 1, version: "a" });
+    socket.emit("cursor:update", "garbage");
+    socket.emit("workspace:leave", { workspaceId: { $gt: "" } });
+
+    const ack = await socket
+      .timeout(2000)
+      .emitWithAck("workspace:update", { workspaceId: "nope", content: "", version: 1 });
+    assert.deepEqual(ack, { ok: false, reason: "invalid" });
+
+    // Server still answers HTTP after all of the above.
+    assert.equal((await api(ctx, "/health")).status, 200);
+    socket.disconnect();
+  });
+
+  it("applies updates atomically: exactly one of two concurrent writers wins", async () => {
+    const { owner, member, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    const b = await connectSocket(ctx, member.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+    b.emit("workspace:join", { workspaceId });
+    await once(b, "workspace:sync");
+
+    const [ackA, ackB] = await Promise.all([
+      a.timeout(2000).emitWithAck("workspace:update", { workspaceId, content: "from A", version: 1 }),
+      b.timeout(2000).emitWithAck("workspace:update", { workspaceId, content: "from B", version: 1 })
+    ]);
+    const oks = [ackA, ackB].filter((r) => r.ok);
+    const conflicts = [ackA, ackB].filter((r) => !r.ok);
+    assert.equal(oks.length, 1);
+    assert.equal(conflicts.length, 1);
+    assert.equal(conflicts[0].reason, "conflict");
+    assert.equal(conflicts[0].version, 2);
+
+    const ws = await api(ctx, `/api/workspaces/${workspaceId}`, { token: owner.token });
+    assert.equal(ws.body.workspace.version, 2);
+
+    a.disconnect();
+    b.disconnect();
+  });
+
+  it("broadcasts updates to others but not back to the sender", async () => {
+    const { owner, member, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    const b = await connectSocket(ctx, member.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+    b.emit("workspace:join", { workspaceId });
+    await once(b, "workspace:sync");
+
+    const received = once(b, "workspace:update");
+    const echoed = notReceived(a, "workspace:update");
+    const ack = await a.timeout(2000).emitWithAck("workspace:update", {
+      workspaceId,
+      content: "hello",
+      version: 1
+    });
+    assert.deepEqual(ack, { ok: true, version: 2 });
+    const update = await received;
+    assert.equal(update.content, "hello");
+    assert.equal(update.version, 2);
+    assert.equal(await echoed, true);
+
+    a.disconnect();
+    b.disconnect();
+  });
+
+  it("rate-limits activity entries for rapid edits", async () => {
+    const { owner, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+
+    for (let v = 1; v <= 10; v++) {
+      const ack = await a
+        .timeout(2000)
+        .emitWithAck("workspace:update", { workspaceId, content: `v${v}`, version: v });
+      assert.equal(ack.ok, true);
+    }
+    const edits = await ActivityLog.countDocuments({ workspaceId, action: "workspace:updated" });
+    assert.equal(edits, 1);
+    a.disconnect();
+  });
+
+  it("blocks non-members from editing, cursor broadcasts, and activity writes", async () => {
+    const { owner, outsider, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    const x = await connectSocket(ctx, outsider.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+
+    // Outsider tries to join: no sync comes back.
+    x.emit("workspace:join", { workspaceId });
+    assert.equal(await notReceived(x, "workspace:sync"), true);
+
+    const ack = await x
+      .timeout(2000)
+      .emitWithAck("workspace:update", { workspaceId, content: "pwned", version: 1 });
+    assert.deepEqual(ack, { ok: false, reason: "forbidden" });
+
+    const noCursor = notReceived(a, "cursor:update");
+    x.emit("cursor:update", { workspaceId, cursor: { x: 1, y: 1 } });
+    assert.equal(await noCursor, true);
+
+    const before = await ActivityLog.countDocuments({ workspaceId });
+    x.emit("workspace:leave", { workspaceId });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(await ActivityLog.countDocuments({ workspaceId }), before);
+
+    a.disconnect();
+    x.disconnect();
+  });
+
+  it("evicts a member's sockets when they leave via the API", async () => {
+    const { owner, member, workspaceId } = await setupWorkspace();
+    const a = await connectSocket(ctx, owner.token);
+    const b = await connectSocket(ctx, member.token);
+    a.emit("workspace:join", { workspaceId });
+    await once(a, "workspace:sync");
+    b.emit("workspace:join", { workspaceId });
+    await once(b, "workspace:sync");
+
+    const removed = once(b, "workspace:removed");
+    const presence = once<{ users: { id: string }[] }>(a, "presence:update");
+    await api(ctx, `/api/workspaces/${workspaceId}`, { method: "DELETE", token: member.token });
+    await removed;
+    const { users } = await presence;
+    assert.deepEqual(users.map((u) => u.id), [owner.user.id]);
+
+    // Their cursor no longer reaches the room.
+    const noCursor = notReceived(a, "cursor:update");
+    b.emit("cursor:update", { workspaceId, cursor: { x: 1, y: 1 } });
+    assert.equal(await noCursor, true);
+
+    a.disconnect();
+    b.disconnect();
+  });
+
+  it("lists a user once in presence even with two tabs open", async () => {
+    const { owner, workspaceId } = await setupWorkspace();
+    const tab1 = await connectSocket(ctx, owner.token);
+    const tab2 = await connectSocket(ctx, owner.token);
+    tab1.emit("workspace:join", { workspaceId });
+    await once(tab1, "workspace:sync");
+    const presence = once<{ users: unknown[] }>(tab1, "presence:update");
+    tab2.emit("workspace:join", { workspaceId });
+    assert.equal((await presence).users.length, 1);
+    tab1.disconnect();
+    tab2.disconnect();
+  });
+});

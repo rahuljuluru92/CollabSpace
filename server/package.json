@@ -6,29 +6,32 @@
     "dev": "nodemon --watch src --exec \"ts-node --files src/index.ts\"",
     "build": "tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "TS_NODE_TRANSPILE_ONLY=true node --require ts-node/register --test --test-concurrency=1 test/*.test.ts",
+    "test:unit": "TS_NODE_TRANSPILE_ONLY=true node --require ts-node/register --test --test-concurrency=1 test/unit.test.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "CollabSpace API and real-time server",
   "dependencies": {
+    "@types/bcryptjs": "^2.4.2",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.2.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.12.1",
-    "socket.io": "^4.8.3",
-    "@types/bcryptjs": "^2.4.2",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^25.2.0"
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
+    "mongodb-memory-server": "^10.1.4",
     "nodemon": "^3.1.11",
+    "socket.io-client": "^4.8.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }
