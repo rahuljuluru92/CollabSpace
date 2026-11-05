@@ -21,4 +21,8 @@ const workspaceSchema = new Schema<WorkspaceDocument>(
   { timestamps: { createdAt: false, updatedAt: true } }
 );
 
+// Serves the "my workspaces" listing ($or on owner/members).
+workspaceSchema.index({ ownerId: 1 });
+workspaceSchema.index({ members: 1 });
+
 export const Workspace = mongoose.model<WorkspaceDocument>("Workspace", workspaceSchema);

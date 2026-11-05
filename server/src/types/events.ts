@@ -8,21 +8,15 @@ export interface WorkspaceUpdatePayload {
   version: number;
 }
 
+/** Acknowledgement sent back to the client for every workspace:update. */
+export type UpdateAck =
+  | { ok: true; version: number }
+  | { ok: false; reason: "conflict"; content: string; version: number }
+  | { ok: false; reason: "invalid" | "forbidden" | "error" };
+
 export interface CursorPayload {
   workspaceId: string;
-  cursor: {
-    x: number;
-    y: number;
-  };
-}
-
-export interface TypingPayload {
-  workspaceId: string;
-  typing: boolean;
-}
-
-export interface AuthPayload {
-  token: string;
+  cursor: { x: number; y: number } | null;
 }
 
 export interface WorkspaceSyncPayload {

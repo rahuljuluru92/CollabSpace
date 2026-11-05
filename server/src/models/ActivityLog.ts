@@ -19,4 +19,7 @@ const activityLogSchema = new Schema<ActivityLogDocument>(
   { timestamps: { createdAt: true, updatedAt: false } }
 );
 
+// Serves "latest N entries for a workspace" and deleteMany by workspace.
+activityLogSchema.index({ workspaceId: 1, createdAt: -1 });
+
 export const ActivityLog = mongoose.model<ActivityLogDocument>("ActivityLog", activityLogSchema);

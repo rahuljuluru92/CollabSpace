@@ -3,6 +3,13 @@ import { Workspace, WorkspaceDocument } from "../models/Workspace";
 import { User } from "../models/User";
 import { ActivityLog, ActivityLogDocument } from "../models/ActivityLog";
 import { logActivity } from "../services/activity";
+import {
+  isWorkspaceMember,
+  serializeActivity,
+  serializeWorkspace
+} from "../services/workspaceSerializer";
+import { evictFromWorkspace } from "../sockets/registry";
+import { LIMITS, isEmail, isNonEmptyString, isValidContent, normalizeEmail } from "../utils/validation";
 
 export async function listWorkspaces(req: Request, res: Response) {
   const userId = req.user!.id;
@@ -12,29 +19,24 @@ export async function listWorkspaces(req: Request, res: Response) {
     .sort({ updatedAt: -1 })
     .lean<WorkspaceDocument[]>();
 
-  return res.json({
-    workspaces: workspaces.map((ws: WorkspaceDocument) => ({
-      id: ws._id.toString(),
-      name: ws.name,
-      ownerId: ws.ownerId.toString(),
-      members: ws.members.map((m: WorkspaceDocument["members"][number]) => m.toString()),
-      content: ws.content,
-      version: ws.version,
-      updatedAt: ws.updatedAt
-    }))
-  });
+  return res.json({ workspaces: workspaces.map(serializeWorkspace) });
 }
 
 export async function createWorkspace(req: Request, res: Response) {
   const userId = req.user!.id;
-  const { name, content } = req.body as { name?: string; content?: string };
+  const { name, content } = (req.body ?? {}) as Record<string, unknown>;
 
-  if (!name) {
-    return res.status(400).json({ error: "Missing name" });
+  if (!isNonEmptyString(name, LIMITS.workspaceNameMax)) {
+    return res
+      .status(400)
+      .json({ error: `Name is required (max ${LIMITS.workspaceNameMax} characters)` });
+  }
+  if (content !== undefined && !isValidContent(content)) {
+    return res.status(400).json({ error: "Invalid content" });
   }
 
   const workspace = await Workspace.create({
-    name,
+    name: name.trim(),
     ownerId: userId,
     members: [userId],
     content: content ?? "",
@@ -47,17 +49,7 @@ export async function createWorkspace(req: Request, res: Response) {
     action: "workspace:created"
   });
 
-  return res.status(201).json({
-    workspace: {
-      id: workspace.id,
-      name: workspace.name,
-      ownerId: workspace.ownerId.toString(),
-      members: workspace.members.map((m: WorkspaceDocument["members"][number]) => m.toString()),
-      content: workspace.content,
-      version: workspace.version,
-      updatedAt: workspace.updatedAt
-    }
-  });
+  return res.status(201).json({ workspace: serializeWorkspace(workspace) });
 }
 
 export async function getWorkspace(req: Request, res: Response) {
@@ -69,13 +61,7 @@ export async function getWorkspace(req: Request, res: Response) {
     return res.status(404).json({ error: "Workspace not found" });
   }
 
-  const isMember =
-    workspace.ownerId.toString() === userId ||
-    workspace.members
-      .map((m: WorkspaceDocument["members"][number]) => m.toString())
-      .includes(userId);
-
-  if (!isMember) {
+  if (!isWorkspaceMember(userId, workspace)) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
@@ -85,32 +71,18 @@ export async function getWorkspace(req: Request, res: Response) {
     .lean<ActivityLogDocument[]>();
 
   return res.json({
-    workspace: {
-      id: workspace.id,
-      name: workspace.name,
-      ownerId: workspace.ownerId.toString(),
-      members: workspace.members.map((m: WorkspaceDocument["members"][number]) => m.toString()),
-      content: workspace.content,
-      version: workspace.version,
-      updatedAt: workspace.updatedAt
-    },
-    activity: activity.map((log: ActivityLogDocument) => ({
-      id: log._id.toString(),
-      action: log.action,
-      userId: log.userId.toString(),
-      metadata: log.metadata ?? {},
-      createdAt: log.createdAt
-    }))
+    workspace: serializeWorkspace(workspace),
+    activity: activity.map(serializeActivity)
   });
 }
 
 export async function inviteMember(req: Request, res: Response) {
   const userId = req.user!.id;
   const workspaceId = req.params.id;
-  const { email } = req.body as { email?: string };
+  const { email } = (req.body ?? {}) as Record<string, unknown>;
 
-  if (!email) {
-    return res.status(400).json({ error: "Missing email" });
+  if (!isEmail(email)) {
+    return res.status(400).json({ error: "A valid email is required" });
   }
 
   const workspace = await Workspace.findById(workspaceId);
@@ -122,25 +94,26 @@ export async function inviteMember(req: Request, res: Response) {
     return res.status(403).json({ error: "Only the owner can invite" });
   }
 
-  const user = await User.findOne({ email: email.toLowerCase() });
+  const user = await User.findOne({ email: normalizeEmail(email) });
   if (!user) {
     return res.status(404).json({ error: "User not found" });
   }
 
-  const memberIds = workspace.members.map((m: WorkspaceDocument["members"][number]) => m.toString());
-  let added = false;
-  if (!memberIds.includes(user.id)) {
-    workspace.members.push(user._id);
-    await workspace.save();
-    added = true;
-  }
+  // $addToSet is atomic, so concurrent invites cannot add duplicates.
+  const result = await Workspace.updateOne(
+    { _id: workspace._id },
+    { $addToSet: { members: user._id } }
+  );
+  const added = result.modifiedCount > 0;
 
-  await logActivity({
-    workspaceId: workspace._id,
-    userId,
-    action: "member:invited",
-    metadata: { invitedUserId: user.id, invitedEmail: user.email }
-  });
+  if (added) {
+    await logActivity({
+      workspaceId: workspace._id,
+      userId,
+      action: "member:invited",
+      metadata: { invitedUserId: user.id, invitedEmail: user.email }
+    });
+  }
 
   return res.json({
     added,
@@ -149,38 +122,35 @@ export async function inviteMember(req: Request, res: Response) {
 }
 
 export async function deleteWorkspace(req: Request, res: Response) {
-  console.log("DELETE request received for id:", req.params.id);
   const userId = req.user!.id;
-  const workspaceId = req.params.id;
+  const workspaceId = req.params.id as string;
 
   const workspace = await Workspace.findById(workspaceId);
   if (!workspace) {
     return res.status(404).json({ error: "Workspace not found" });
   }
 
-  // Owner deletes strictly
+  // Owner deletes the workspace entirely.
   if (workspace.ownerId.toString() === userId) {
-    await Workspace.findByIdAndDelete(workspaceId);
-    // Also clean up activity logs? Optional but good practice.
+    await Workspace.deleteOne({ _id: workspace._id });
     await ActivityLog.deleteMany({ workspaceId: workspace._id });
+    await evictFromWorkspace(workspaceId);
     return res.json({ success: true, message: "Workspace deleted" });
   }
 
-  // Member leaves
-  const memberIndex = workspace.members.findIndex(
-    (m: WorkspaceDocument["members"][number]) => m.toString() === userId
+  // A member leaves.
+  const result = await Workspace.updateOne(
+    { _id: workspace._id, members: userId },
+    { $pull: { members: userId } }
   );
 
-  if (memberIndex !== -1) {
-    workspace.members.splice(memberIndex, 1);
-    await workspace.save();
-
+  if (result.modifiedCount > 0) {
     await logActivity({
       workspaceId: workspace._id,
       userId,
       action: "member:left"
     });
-
+    await evictFromWorkspace(workspaceId, userId);
     return res.json({ success: true, message: "Left workspace" });
   }
 
